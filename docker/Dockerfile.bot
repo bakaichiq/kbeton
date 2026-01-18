@@ -1,0 +1,2 @@
+FROM kbeton-base:latest
+CMD ["bash", "-lc", "python -m apps.bot.main"]

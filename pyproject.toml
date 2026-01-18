@@ -1,0 +1,10 @@
+[project]
+name = "kbeton-bot-erp"
+version = "0.1.0"
+description = "Telegram bot + FastAPI + PostgreSQL ERP for concrete plant accounting and reporting"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,2 @@
+FROM kbeton-base:latest
+CMD ["bash", "-lc", "celery -A apps.worker.celery_app.celery worker -l INFO --concurrency=2"]
