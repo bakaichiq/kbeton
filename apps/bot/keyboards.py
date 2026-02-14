@@ -43,7 +43,6 @@ def finance_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
         kb.add(KeyboardButton(text=text))
     action_buttons: list[str] = []
     if _role_allowed(role, {Role.Admin, Role.FinDir}):
-        action_buttons.append("📥 Загрузить выгрузку 1С (финансы)")
         action_buttons.append("📥 Загрузить взаиморасчеты (контрагенты)")
         action_buttons.append("📦 Статус импорта")
     if _role_allowed(role, {Role.Admin, Role.FinDir, Role.Viewer}):
@@ -218,6 +217,17 @@ def overhead_cost_kb() -> ReplyKeyboardMarkup:
     for text in ["энергия", "амортизация"]:
         kb.add(KeyboardButton(text=text))
     _adjust_rows(kb, [2, 1], 2)
+    return kb.as_markup(resize_keyboard=True)
+
+def concrete_cost_mark_kb(marks: list[str]) -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardBuilder()
+    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
+    for text in base_buttons:
+        kb.add(KeyboardButton(text=text))
+    kb.add(KeyboardButton(text="Все"))
+    for text in marks:
+        kb.add(KeyboardButton(text=text))
+    _adjust_rows(kb, [2, 1], 1 + len(marks))
     return kb.as_markup(resize_keyboard=True)
 
 def articles_kb(articles: list[tuple[int, str]], prefix: str) -> InlineKeyboardMarkup:

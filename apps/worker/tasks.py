@@ -1,32 +1,24 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-import uuid
-import structlog
 import httpx
 
 from celery import shared_task
-from sqlalchemy import select, update, func
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
 
 from kbeton.core.config import settings
 from kbeton.db.session import session_scope
-from kbeton.importers.finance_importer import parse_finance_xlsx, make_dedup_hash
 from kbeton.importers.counterparties_importer import parse_counterparties_xlsx
-from kbeton.models.finance import ImportJob, FinanceTransaction
-from kbeton.models.enums import TxType
+from kbeton.models.finance import ImportJob
 from kbeton.models.counterparty import CounterpartySnapshot, CounterpartyBalance
 from kbeton.models.inventory import InventoryItem, InventoryBalance
 from kbeton.models.user import User
 from kbeton.models.enums import Role, ShiftStatus, ProductType
 from kbeton.models.production import ProductionShift, ProductionOutput
 from kbeton.services.s3 import get_bytes
-from kbeton.services.mapping import classify_transaction, apply_article
 from kbeton.services.audit import audit_log
 from kbeton.reports.pnl import pnl as pnl_calc
 from kbeton.reports.export_xlsx import pnl_to_xlsx
-
-log = structlog.get_logger(__name__)
 
 def tg_send_message(chat_id: int, text: str) -> None:
     if not settings.telegram_bot_token:
@@ -54,85 +46,6 @@ def _notify_import(session, job: ImportJob, text: str, include_default: bool = F
         chat_ids.add(int(settings.telegram_default_chat_id))
     for cid in chat_ids:
         tg_send_message(cid, text)
-
-@shared_task(name="apps.worker.tasks.process_finance_import")
-def process_finance_import(import_job_id: int) -> dict:
-    with session_scope() as session:
-        job = session.execute(select(ImportJob).where(ImportJob.id == import_job_id)).scalar_one()
-        job.status = "processing"
-        session.flush()
-
-        try:
-            xlsx = get_bytes(job.s3_key)
-            rows = parse_finance_xlsx(xlsx, default_currency="KGS")
-        except Exception as e:
-            job.status = "failed"
-            job.error = str(e)
-            audit_log(session, actor_user_id=job.created_by_user_id, action="finance_import_failed", entity_type="import_job", entity_id=str(job.id), payload={"error": str(e)})
-            _notify_import(session, job, f"❌ Импорт финансов #{job.id} не выполнен.\nОшибка: {e}", include_default=True)
-            return {"ok": False, "error": str(e)}
-
-        accepted = 0
-        dup = 0
-        unknown = 0
-        errors = 0
-
-        for r in rows:
-            try:
-                tx_type = TxType.unknown
-                income_article_id = None
-                expense_article_id = None
-
-                # if 1C provides explicit type, try interpret
-                if r.tx_type:
-                    t = r.tx_type.lower()
-                    if "приход" in t or "income" in t:
-                        tx_type = TxType.income
-                    elif "расход" in t or "expense" in t:
-                        tx_type = TxType.expense
-
-                if tx_type == TxType.unknown:
-                    tx_type, article_id = classify_transaction(session, description=r.description, counterparty=r.counterparty)
-                    if article_id:
-                        income_article_id, expense_article_id = apply_article(session, tx_type=tx_type, article_id=article_id)
-
-                if tx_type == TxType.unknown:
-                    unknown += 1
-
-                tx = FinanceTransaction(
-                    import_job_id=job.id,
-                    date=r.date,
-                    amount=r.amount,
-                    currency=r.currency or "KGS",
-                    tx_type=tx_type,
-                    description=r.description or "",
-                    counterparty=r.counterparty or "",
-                    income_article_id=income_article_id,
-                    expense_article_id=expense_article_id,
-                    dedup_hash=make_dedup_hash(r),
-                    raw_fields=r.raw_fields or {},
-                )
-                session.add(tx)
-                session.flush()
-                accepted += 1
-            except IntegrityError:
-                session.rollback()
-                dup += 1
-            except Exception as e:
-                session.rollback()
-                errors += 1
-
-        job.status = "done" if errors == 0 else "done_with_errors"
-        job.processed_at = datetime.now().astimezone()
-        job.summary = {"accepted": accepted, "duplicates": dup, "unknown": unknown, "errors": errors}
-        audit_log(session, actor_user_id=job.created_by_user_id, action="finance_import_done", entity_type="import_job", entity_id=str(job.id), payload=job.summary)
-
-        status_text = "✅ Импорт финансов завершен"
-        if errors > 0:
-            status_text = "⚠️ Импорт финансов завершен с ошибками"
-        summary_text = f"accepted={accepted}, dup={dup}, unknown={unknown}, errors={errors}"
-        _notify_import(session, job, f"{status_text} (#{job.id}).\n{summary_text}", include_default=errors > 0)
-        return {"ok": True, **job.summary}
 
 @shared_task(name="apps.worker.tasks.process_counterparty_import")
 def process_counterparty_import(import_job_id: int) -> dict:

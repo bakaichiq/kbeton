@@ -1,9 +1,6 @@
 from __future__ import annotations
 from aiogram.fsm.state import State, StatesGroup
 
-class FinanceUploadState(StatesGroup):
-    waiting_file = State()
-
 class CounterpartyUploadState(StatesGroup):
     waiting_file = State()
 

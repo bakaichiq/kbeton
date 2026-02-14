@@ -29,9 +29,9 @@ from apps.bot.keyboards import (
     finance_menu,
     material_price_kb,
     overhead_cost_kb,
+    concrete_cost_mark_kb,
 )
 from apps.bot.states import (
-    FinanceUploadState,
     CounterpartyUploadState,
     CounterpartyCardState,
     ArticleAddState,
@@ -93,6 +93,28 @@ def _latest_overheads(session) -> dict:
         out[key] = r
     return out
 
+def _calc_recipe_cost(recipe: ConcreteRecipe, prices: dict, overheads: dict) -> tuple[float, list[str]]:
+    missing = []
+    total = 0.0
+    def _add(item: str, qty: float):
+        nonlocal total
+        if qty <= 0:
+            return
+        p = prices.get(item)
+        if not p:
+            missing.append(item)
+            return
+        total += float(p.price) * qty
+    _add("цемент", float(recipe.cement_kg or 0))
+    _add("песок", float(recipe.sand_t or 0))
+    _add("щебень", float(recipe.crushed_stone_t or 0))
+    _add("отсев", float(recipe.screening_t or 0))
+    _add("вода", float(recipe.water_l or 0))
+    _add("добавки", float(recipe.additives_l or 0))
+    for _, oh in overheads.items():
+        total += float(oh.cost_per_m3 or 0)
+    return total, missing
+
 def _range_for(period: str) -> tuple[date, date]:
     today = date.today()
     if period == "day":
@@ -137,44 +159,6 @@ def _pnl_payload(period: str):
         text += "\n" + "\n".join(lines)
     caption = f"P&L {period} {start.isoformat()}-{end.isoformat()}"
     return text, xlsx, caption
-
-@router.message(F.text == "📥 Загрузить выгрузку 1С (финансы)")
-async def finance_upload_prompt(message: Message, state: FSMContext, **data):
-    user = get_db_user(data, message)
-    ensure_role(user, {Role.Admin, Role.FinDir})
-    await state.set_state(FinanceUploadState.waiting_file)
-    await message.answer("Отправьте XLSX выгрузку из 1С (финансы) как файл (document).")
-
-@router.message(FinanceUploadState.waiting_file, F.document)
-async def finance_upload_handle(message: Message, state: FSMContext, **data):
-    user = get_db_user(data, message)
-    ensure_role(user, {Role.Admin, Role.FinDir})
-
-    doc = message.document
-    if not doc.file_name.lower().endswith(".xlsx"):
-        await message.answer("Нужен файл .xlsx")
-        return
-    file = await message.bot.get_file(doc.file_id)
-    b = await message.bot.download_file(file.file_path)
-    content = b.read()
-
-    key = f"imports/finance/{uuid.uuid4().hex}_{doc.file_name}"
-    put_bytes(key, content, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    with session_scope() as session:
-        job = ImportJob(kind="finance", status="pending", filename=doc.file_name, s3_key=key, created_by_user_id=user.id)
-        session.add(job)
-        session.flush()
-        audit_log(session, actor_user_id=user.id, action="finance_import_created", entity_type="import_job", entity_id=str(job.id), payload={"filename": doc.file_name, "s3_key": key})
-        job_id = job.id
-
-    celery.send_task("apps.worker.tasks.process_finance_import", args=[job_id])
-    await state.clear()
-    await message.answer(f"✅ Импорт создан. job_id={job_id}. Обработка в фоне.\nСмотрите результат в '🧩 Неразобранное' и в P&L.", reply_markup=finance_menu(user.role))
-
-@router.message(FinanceUploadState.waiting_file)
-async def finance_upload_waiting(message: Message, **data):
-    await message.answer("Пожалуйста, отправьте XLSX как файл (document) или напишите 'отмена'.")
 
 @router.message(F.text == "📥 Загрузить взаиморасчеты (контрагенты)")
 async def cp_upload_prompt(message: Message, state: FSMContext, **data):
@@ -573,6 +557,152 @@ async def prices_set(message: Message, state: FSMContext, **data):
             audit_log(session, actor_user_id=user.id, action="price_set", entity_type="price_version", entity_id=str(pv.id), payload={"kind": kind.value, "item_key": key, "price": price})
     await state.clear()
     await message.answer("✅ Цены обновлены.", reply_markup=finance_menu(user.role))
+
+@router.message(F.text == "🧾 Цены материалов")
+async def material_prices_menu(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    with session_scope() as session:
+        cur = _latest_material_prices(session)
+    lines = ["🧾 Цены материалов (текущие):"]
+    for key in ["цемент", "песок", "щебень", "отсев", "вода", "добавки"]:
+        p = cur.get(key)
+        if p:
+            lines.append(f"- {key}: {float(p.price):.3f} {p.currency}/{p.unit} (с {p.valid_from.isoformat()})")
+        else:
+            lines.append(f"- {key}: не задано")
+    lines.append("\nВыберите материал для обновления:")
+    await state.set_state(MaterialPriceState.waiting_item)
+    await message.answer("\n".join(lines), reply_markup=material_price_kb())
+
+@router.message(MaterialPriceState.waiting_item)
+async def material_price_item(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    t = (message.text or "").strip().lower()
+    if t in ("отмена", "/cancel"):
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=finance_menu(user.role))
+        return
+    if t not in MATERIAL_UNITS:
+        await message.answer("Выберите материал кнопкой.", reply_markup=material_price_kb())
+        return
+    await state.update_data(item_key=t)
+    await state.set_state(MaterialPriceState.waiting_price)
+    await message.answer(f"Цена за {MATERIAL_UNITS[t]} (KGS):")
+
+@router.message(MaterialPriceState.waiting_price)
+async def material_price_value(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    qty = _parse_float(message.text or "")
+    if qty is None:
+        await message.answer("Нужно число.")
+        return
+    st = await state.get_data()
+    key = st.get("item_key")
+    now = datetime.now().astimezone()
+    with session_scope() as session:
+        mp = MaterialPrice(
+            item_key=key,
+            unit=MATERIAL_UNITS[key],
+            price=qty,
+            currency="KGS",
+            valid_from=now,
+            changed_by_user_id=user.id,
+        )
+        session.add(mp)
+        audit_log(session, actor_user_id=user.id, action="material_price_set", entity_type="material_price", entity_id=str(mp.id or 0), payload={"item_key": key, "price": qty})
+    await state.clear()
+    await message.answer("✅ Цена материала обновлена.", reply_markup=finance_menu(user.role))
+
+@router.message(F.text == "⚙️ Накладные на 1м3")
+async def overhead_menu(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    with session_scope() as session:
+        cur = _latest_overheads(session)
+    lines = ["⚙️ Накладные на 1 м3 (текущие):"]
+    for key in ["энергия", "амортизация"]:
+        p = cur.get(key)
+        if p:
+            lines.append(f"- {key}: {float(p.cost_per_m3):.3f} {p.currency}/м3 (с {p.valid_from.isoformat()})")
+        else:
+            lines.append(f"- {key}: не задано")
+    lines.append("\nВыберите статью накладных:")
+    await state.set_state(OverheadCostState.waiting_name)
+    await message.answer("\n".join(lines), reply_markup=overhead_cost_kb())
+
+@router.message(OverheadCostState.waiting_name)
+async def overhead_name(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    t = (message.text or "").strip().lower()
+    if t in ("отмена", "/cancel"):
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=finance_menu(user.role))
+        return
+    if t not in ("энергия", "амортизация"):
+        await message.answer("Выберите статью кнопкой.", reply_markup=overhead_cost_kb())
+        return
+    await state.update_data(name=t)
+    await state.set_state(OverheadCostState.waiting_cost)
+    await message.answer("Сумма на 1 м3 (KGS):")
+
+@router.message(OverheadCostState.waiting_cost)
+async def overhead_cost_value(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    qty = _parse_float(message.text or "")
+    if qty is None:
+        await message.answer("Нужно число.")
+        return
+    st = await state.get_data()
+    name = st.get("name")
+    now = datetime.now().astimezone()
+    with session_scope() as session:
+        oh = OverheadCost(
+            name=name,
+            cost_per_m3=qty,
+            currency="KGS",
+            valid_from=now,
+            changed_by_user_id=user.id,
+        )
+        session.add(oh)
+        audit_log(session, actor_user_id=user.id, action="overhead_cost_set", entity_type="overhead_cost", entity_id=str(oh.id or 0), payload={"name": name, "cost": qty})
+    await state.clear()
+    await message.answer("✅ Накладные обновлены.", reply_markup=finance_menu(user.role))
+
+@router.message(F.text == "📊 Себестоимость бетона")
+async def concrete_cost_report(message: Message, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir, Role.Viewer})
+    with session_scope() as session:
+        recipes = session.query(ConcreteRecipe).filter(ConcreteRecipe.is_active == True).order_by(ConcreteRecipe.mark.asc()).all()
+        prices = _latest_material_prices(session)
+        overheads = _latest_overheads(session)
+    if not recipes:
+        await message.answer("Нет активных рецептур. Добавьте в '🧪 Рецептуры бетона'.")
+        return
+    lines = ["📊 Себестоимость бетона (на 1 м3):"]
+    total_sum = 0.0
+    count = 0
+    missing_any = []
+    for r in recipes:
+        cost, missing = _calc_recipe_cost(r, prices, overheads)
+        if missing:
+            missing_any.append(f"{r.mark}: нет цены для {', '.join(sorted(set(missing)))}")
+            continue
+        lines.append(f"- {r.mark}: {cost:.3f} KGS/м3")
+        total_sum += cost
+        count += 1
+    if count > 0:
+        lines.append(f"Средняя по всем маркам: {(total_sum / count):.3f} KGS/м3")
+    if missing_any:
+        lines.append("⚠️ Нет цен для расчета:")
+        for m in missing_any[:10]:
+            lines.append(f"- {m}")
+    await message.answer("\n".join(lines))
 
 @router.message(F.text == "📊 Дашборд")
 async def dashboard_quick(message: Message, **data):
