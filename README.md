@@ -165,3 +165,22 @@ docker compose logs -f api
 docker compose logs -f bot
 docker compose logs -f worker
 ```
+
+## Автодеплой после push в main
+
+Если нужно, чтобы на другом компьютере (локальный сервер) после `git push` автоматически выполнялись `git pull` и `docker compose up -d --build`, используйте workflow:
+
+- `.github/workflows/deploy-on-push.yml`
+
+В GitHub репозитории добавьте Secrets:
+
+- `DEPLOY_HOST` — IP/домен серверного компьютера
+- `DEPLOY_USER` — SSH пользователь
+- `DEPLOY_PATH` — путь к проекту на сервере (например `/opt/kbeton_bot_erp_full`)
+- `DEPLOY_SSH_KEY` — приватный SSH ключ (ed25519), соответствующий публичному ключу в `~/.ssh/authorized_keys` на сервере
+
+Требования на серверном компьютере:
+
+- установлен Docker + Docker Compose
+- репозиторий уже склонирован в `DEPLOY_PATH`
+- SSH доступ разрешен
