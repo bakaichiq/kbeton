@@ -4,6 +4,8 @@ import asyncio
 import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.base import BaseStorage
+from aiogram.fsm.storage.redis import RedisStorage
 
 from kbeton.core.config import settings
 from kbeton.core.logging import configure_logging
@@ -18,6 +20,15 @@ from apps.bot.routers import admin as admin_router
 
 log = structlog.get_logger(__name__)
 
+
+def build_fsm_storage() -> BaseStorage:
+    if settings.bot_fsm_storage == "redis":
+        return RedisStorage.from_url(settings.bot_fsm_redis_url)
+    if settings.bot_fsm_storage == "memory":
+        return MemoryStorage()
+    raise RuntimeError("BOT_FSM_STORAGE must be one of: memory, redis")
+
+
 async def main() -> None:
     configure_logging(settings.log_level)
 
@@ -25,7 +36,8 @@ async def main() -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
     bot = Bot(token=settings.telegram_bot_token)
-    dp = Dispatcher(storage=MemoryStorage())
+    storage = build_fsm_storage()
+    dp = Dispatcher(storage=storage)
     dp.message.middleware(RBACMiddleware())
     dp.callback_query.middleware(RBACMiddleware())
 
@@ -36,7 +48,7 @@ async def main() -> None:
     dp.include_router(warehouse_router.router)
     dp.include_router(admin_router.router)
 
-    log.info("bot_start", env=settings.env)
+    log.info("bot_start", env=settings.env, fsm_storage=settings.bot_fsm_storage)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

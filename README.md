@@ -41,6 +41,9 @@ Production-ready система учета и отчетности бетонн�
 Скопируйте `.env.example` → `.env` и задайте минимум:
 
 - `TELEGRAM_BOT_TOKEN=...` (обязательно)
+- `POSTGRES_PASSWORD=...` (обязательно)
+- `S3_ACCESS_KEY_ID=...` и `S3_SECRET_ACCESS_KEY=...` (обязательно)
+- `API_AUTH_ENABLED=true` и `API_TOKEN=...` для защиты API
 - (опционально) `TELEGRAM_DEFAULT_CHAT_ID=...` для рассылок
 
 ### 2) Запуск
@@ -53,6 +56,8 @@ docker compose up -d --build
 После старта:
 - API: http://localhost:8000/health
 - MinIO Console: http://localhost:9001 (логин/пароль из `.env`)
+
+> При `API_AUTH_ENABLED=true` эндпоинты `/pnl`, `/pnl.xlsx`, `/prices/current` требуют токен в `Authorization: Bearer <API_TOKEN>` или `X-API-Key`.
 
 > Миграции выполняются сервисом `migrate` автоматически при старте.
 

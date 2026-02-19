@@ -19,6 +19,11 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_default_chat_id: str = Field(default="", alias="TELEGRAM_DEFAULT_CHAT_ID")
+    bot_fsm_storage: str = Field(default="memory", alias="BOT_FSM_STORAGE")
+    bot_fsm_redis_url: str = Field(default="redis://redis:6379/3", alias="BOT_FSM_REDIS_URL")
+
+    api_auth_enabled: bool = Field(default=False, alias="API_AUTH_ENABLED")
+    api_token: str = Field(default="", alias="API_TOKEN")
 
     s3_endpoint_url: str = Field(default="http://minio:9000", alias="S3_ENDPOINT_URL")
     s3_access_key_id: str = Field(default="minioadmin", alias="S3_ACCESS_KEY_ID")

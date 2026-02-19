@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from fastapi import FastAPI, Query
+from fastapi import APIRouter, Depends, FastAPI, Query
 from fastapi.responses import Response
 
 from kbeton.core.config import settings
@@ -12,16 +12,18 @@ from kbeton.reports.export_xlsx import pnl_to_xlsx
 from kbeton.schemas.common import Ok
 from kbeton.schemas.finance import PnlResponse, PnlRow as PnlRowSchema
 from kbeton.services.pricing import get_current_prices
+from apps.api.security import require_api_auth
 
 configure_logging(settings.log_level)
 
 app = FastAPI(title=settings.app_name)
+protected = APIRouter(dependencies=[Depends(require_api_auth)])
 
 @app.get("/health", response_model=Ok)
 def health() -> Ok:
     return Ok(ok=True)
 
-@app.get("/pnl", response_model=PnlResponse)
+@protected.get("/pnl", response_model=PnlResponse)
 def pnl(
     period: str = Query("day", pattern="^(day|week|month|quarter|year)$"),
     start: date = Query(...),
@@ -45,7 +47,7 @@ def pnl(
             top_expense_articles=meta.get("top_expense_articles", []),
         )
 
-@app.get("/pnl.xlsx")
+@protected.get("/pnl.xlsx")
 def pnl_xlsx(
     period: str = Query("day", pattern="^(day|week|month|quarter|year)$"),
     start: date = Query(...),
@@ -61,7 +63,9 @@ def pnl_xlsx(
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
-@app.get("/prices/current")
+@protected.get("/prices/current")
 def prices_current():
     with session_scope() as session:
         return get_current_prices(session)
+
+app.include_router(protected)

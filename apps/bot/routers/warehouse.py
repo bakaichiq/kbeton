@@ -59,7 +59,7 @@ async def writeoff_start(message: Message, state: FSMContext, **data):
 
 @router.callback_query(F.data.startswith("inv_item:"))
 async def item_selected(call: CallbackQuery, state: FSMContext, **data):
-    user = get_db_user(data, message)
+    user = get_db_user(data, call.message)
     ensure_role(user, {Role.Admin, Role.Warehouse})
     _, action, item_id = call.data.split(":")
     item_id = int(item_id)
@@ -165,7 +165,7 @@ async def inv_start(message: Message, state: FSMContext, **data):
 
 @router.callback_query(F.data.startswith("inv_item:inv:"))
 async def inv_item(call: CallbackQuery, state: FSMContext, **data):
-    user = get_db_user(data, message)
+    user = get_db_user(data, call.message)
     ensure_role(user, {Role.Admin, Role.Warehouse})
     item_id = int(call.data.split(":")[2])
     await state.update_data(item_id=item_id)
