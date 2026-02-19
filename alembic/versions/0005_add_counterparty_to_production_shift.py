@@ -1,6 +1,6 @@
 """add counterparty_name to production_shifts
 
-Revision ID: 0005_add_counterparty_to_production_shift
+Revision ID: 0005_add_counterparty_shift
 Revises: 0004_add_costs_and_recipe_fields
 Create Date: 2026-02-19
 
@@ -8,7 +8,7 @@ Create Date: 2026-02-19
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0005_add_counterparty_to_production_shift"
+revision = "0005_add_counterparty_shift"
 down_revision = "0004_add_costs_and_recipe_fields"
 branch_labels = None
 depends_on = None
