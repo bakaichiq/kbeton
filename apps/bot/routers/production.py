@@ -13,12 +13,14 @@ from kbeton.models.pricing import PriceVersion
 from kbeton.models.recipes import ConcreteRecipe
 from kbeton.models.user import User
 from kbeton.models.inventory import InventoryItem, InventoryBalance, InventoryTxn
+from kbeton.models.counterparty import CounterpartySnapshot, CounterpartyBalance
 from kbeton.services.audit import audit_log
 
 from apps.bot.keyboards import (
     production_menu,
     shift_type_kb,
     line_type_kb,
+    counterparty_registry_kb,
     concrete_mark_kb,
     concrete_more_kb,
     yes_no_kb,
@@ -104,6 +106,8 @@ def _build_shift_summary(st: dict) -> list[str]:
         lines.append(f"Отсев: {screening:.3f} тн")
         lines.append(f"Песок: {sand:.3f} тн")
     elif line_type == "rbu":
+        counterparty_name = (st.get("counterparty_name") or "").strip()
+        lines.append(f"Контрагент: {counterparty_name or '-'}")
         concrete = st.get("concrete", [])
         if concrete:
             lines.append("Бетон по маркам (м3):")
@@ -135,6 +139,8 @@ def _build_shift_summary_from_shift(shift: ProductionShift) -> list[str]:
         lines.append(f"Оборудование: {shift.equipment}")
     if shift.area:
         lines.append(f"Площадка: {shift.area}")
+    if line_type == "rbu":
+        lines.append(f"Контрагент: {(shift.counterparty_name or '').strip() or '-'}")
     outputs = {}
     concrete = {}
     for o in shift.outputs:
@@ -201,6 +207,27 @@ def _apply_balance(session, item_id: int, delta: float) -> None:
         session.add(bal)
         session.flush()
     bal.qty = float(bal.qty) + float(delta)
+
+def _get_counterparty_registry() -> list[str]:
+    with session_scope() as session:
+        snap = session.query(CounterpartySnapshot).order_by(CounterpartySnapshot.id.desc()).first()
+        if not snap:
+            return []
+        rows = (
+            session.query(CounterpartyBalance.counterparty_name)
+            .filter(CounterpartyBalance.snapshot_id == snap.id)
+            .order_by(CounterpartyBalance.counterparty_name.asc())
+            .all()
+        )
+    out: list[str] = []
+    seen: set[str] = set()
+    for (name,) in rows:
+        value = (name or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
 
 def _auto_writeoff_concrete(session, shift: ProductionShift, actor_user_id: int) -> tuple[list[str], list[str]]:
     warnings: list[str] = []
@@ -289,12 +316,36 @@ async def close_shift_line_type(message: Message, state: FSMContext, **data):
         await state.set_state(ShiftCloseState.waiting_crushed)
         await message.answer("Выпуск щебня (тонн, число):")
     else:
-        await state.set_state(ShiftCloseState.waiting_concrete_mark)
-        marks = _get_concrete_marks()
-        if not marks:
-            await message.answer("Марки бетона не найдены. Добавьте цены или введите марку текстом.", reply_markup=concrete_mark_kb([]))
-        else:
-            await message.answer("Выберите марку бетона:", reply_markup=concrete_mark_kb(marks))
+        counterparties = _get_counterparty_registry()
+        if not counterparties:
+            await state.set_state(ShiftCloseState.waiting_line_type)
+            await message.answer(
+                "Реестр контрагентов пуст. Добавьте контрагента в разделе Финансы.",
+                reply_markup=line_type_kb(),
+            )
+            return
+        await state.set_state(ShiftCloseState.waiting_counterparty)
+        await message.answer(
+            "Выберите контрагента из реестра:",
+            reply_markup=counterparty_registry_kb(counterparties),
+        )
+
+@router.message(ShiftCloseState.waiting_counterparty)
+async def close_shift_counterparty(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.Operator})
+    name = (message.text or "").strip()
+    counterparties = _get_counterparty_registry()
+    if name not in counterparties:
+        await message.answer("Выберите контрагента только из кнопок.", reply_markup=counterparty_registry_kb(counterparties))
+        return
+    await state.update_data(counterparty_name=name)
+    await state.set_state(ShiftCloseState.waiting_concrete_mark)
+    marks = _get_concrete_marks()
+    if not marks:
+        await message.answer("Марки бетона не найдены. Добавьте цены или введите марку текстом.", reply_markup=concrete_mark_kb([]))
+    else:
+        await message.answer("Выберите марку бетона:", reply_markup=concrete_mark_kb(marks))
 
 @router.message(ShiftCloseState.waiting_crushed)
 async def close_shift_crushed(message: Message, state: FSMContext, **data):
@@ -406,6 +457,7 @@ async def shift_confirm(call: CallbackQuery, state: FSMContext, **data):
     equipment = st.get("equipment", "")
     area = st.get("area", "")
     line_type = st.get("line_type", "")
+    counterparty_name = (st.get("counterparty_name") or "").strip()
     crushed = float(st.get("crushed", 0))
     screening = float(st.get("screening", 0))
     sand = float(st.get("sand", 0))
@@ -418,6 +470,7 @@ async def shift_confirm(call: CallbackQuery, state: FSMContext, **data):
             shift_type=shift_type,
             equipment=equipment,
             area=area,
+            counterparty_name=counterparty_name,
             status=ShiftStatus.submitted,
             comment=comment,
             submitted_at=datetime.now().astimezone(),
@@ -493,6 +546,8 @@ async def shifts_pending(message: Message, **data):
                 f"Оборудование: {s.equipment}",
                 f"Площадка: {s.area}",
             ]
+            if (s.counterparty_name or "").strip():
+                lines.append(f"Контрагент: {s.counterparty_name}")
             labels = {
                 "crushed_stone": "Щебень",
                 "screening": "Отсев",
@@ -720,6 +775,7 @@ async def shifts_report_xlsx(call: CallbackQuery, **data):
                     "shift_type": s.shift_type.value,
                     "line": _line_label(line_type),
                     "operator": op_name,
+                    "counterparty": (s.counterparty_name or "").strip(),
                     "product": o.product_type.value,
                     "mark": o.mark or "",
                     "qty": float(o.quantity or 0),

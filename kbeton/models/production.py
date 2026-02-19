@@ -14,6 +14,7 @@ class ProductionShift(Base):
     shift_type: Mapped[ShiftType] = mapped_column(Enum(ShiftType, name="shift_type_enum"), nullable=False)
     equipment: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     area: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    counterparty_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     status: Mapped[ShiftStatus] = mapped_column(Enum(ShiftStatus, name="shift_status_enum"), nullable=False, default=ShiftStatus.draft)
     comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
 

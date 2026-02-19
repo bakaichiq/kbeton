@@ -7,6 +7,9 @@ class CounterpartyUploadState(StatesGroup):
 class CounterpartyCardState(StatesGroup):
     waiting_name = State()
 
+class CounterpartyAddState(StatesGroup):
+    waiting_name = State()
+
 class ArticleAddState(StatesGroup):
     waiting_name = State()
 
@@ -26,6 +29,7 @@ class ShiftCloseState(StatesGroup):
     waiting_equipment = State()
     waiting_area = State()
     waiting_line_type = State()
+    waiting_counterparty = State()
     waiting_crushed = State()
     waiting_screening = State()
     waiting_sand = State()

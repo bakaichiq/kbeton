@@ -34,6 +34,7 @@ from apps.bot.keyboards import (
 from apps.bot.states import (
     CounterpartyUploadState,
     CounterpartyCardState,
+    CounterpartyAddState,
     ArticleAddState,
     PriceSetState,
     MappingRuleAddState,
@@ -54,6 +55,62 @@ MATERIAL_UNITS = {
     "вода": "л",
     "добавки": "л",
 }
+
+def _upsert_counterparty_registry_entry(name: str, actor_user_id: int | None) -> str:
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return ""
+    norm = norm_counterparty_name(cleaned)
+    if not norm:
+        return ""
+
+    with session_scope() as session:
+        snap = session.query(CounterpartySnapshot).order_by(CounterpartySnapshot.id.desc()).first()
+        if not snap:
+            job = ImportJob(
+                kind="counterparty",
+                status="done",
+                filename="manual_counterparty",
+                s3_key="",
+                created_by_user_id=actor_user_id,
+                summary={"manual": True},
+            )
+            session.add(job)
+            session.flush()
+            snap = CounterpartySnapshot(snapshot_date=date.today(), import_job_id=job.id)
+            session.add(snap)
+            session.flush()
+
+        existing = (
+            session.query(CounterpartyBalance)
+            .filter(CounterpartyBalance.snapshot_id == snap.id)
+            .filter(CounterpartyBalance.counterparty_name_norm == norm)
+            .one_or_none()
+        )
+        if existing:
+            return existing.counterparty_name
+
+        session.add(
+            CounterpartyBalance(
+                snapshot_id=snap.id,
+                counterparty_name=cleaned,
+                counterparty_name_norm=norm,
+                receivable_money=0,
+                receivable_assets="",
+                payable_money=0,
+                payable_assets="",
+                ending_balance_money=0,
+            )
+        )
+        audit_log(
+            session,
+            actor_user_id=actor_user_id,
+            action="counterparty_manual_add",
+            entity_type="counterparty_snapshot",
+            entity_id=str(snap.id),
+            payload={"name": cleaned, "name_norm": norm},
+        )
+    return cleaned
 
 def _parse_float(value: str) -> float | None:
     try:
@@ -226,6 +283,33 @@ async def import_status(message: Message, **data):
             parts.append(f"ошибка: {err}")
         lines.append(" | ".join(parts))
     await message.answer("\n".join(lines))
+
+@router.message(F.text == "➕ Добавить контрагента")
+async def counterparty_add_prompt(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    await state.set_state(CounterpartyAddState.waiting_name)
+    await message.answer("Введите название контрагента для добавления в реестр.")
+
+@router.message(CounterpartyAddState.waiting_name)
+async def counterparty_add_save(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    raw_name = (message.text or "").strip()
+    if raw_name.lower() == "отмена":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=finance_menu(user.role))
+        return
+    if len(raw_name) < 2:
+        await message.answer("Название слишком короткое. Введите корректное название контрагента.")
+        return
+    saved_name = _upsert_counterparty_registry_entry(raw_name, user.id)
+    if not saved_name:
+        await message.answer("Не удалось сохранить контрагента. Попробуйте еще раз.")
+        return
+    await state.clear()
+    await message.answer(f"✅ Контрагент добавлен: {saved_name}", reply_markup=finance_menu(user.role))
+
 @router.message(F.text == "📄 P&L")
 async def pnl_prompt(message: Message, **data):
     user = get_db_user(data, message)

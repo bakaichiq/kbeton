@@ -45,6 +45,7 @@ def finance_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
     if _role_allowed(role, {Role.Admin, Role.FinDir}):
         action_buttons.append("📥 Загрузить взаиморасчеты (контрагенты)")
         action_buttons.append("📦 Статус импорта")
+        action_buttons.append("➕ Добавить контрагента")
     if _role_allowed(role, {Role.Admin, Role.FinDir, Role.Viewer}):
         action_buttons.append("📄 P&L")
         action_buttons.append("Контрагенты/Задолженность (снимки)")
@@ -119,6 +120,16 @@ def concrete_more_kb() -> ReplyKeyboardMarkup:
     kb.add(KeyboardButton(text="✅ Еще марка"))
     kb.add(KeyboardButton(text="🏁 Готово"))
     _adjust_rows(kb, [2, 1], 2)
+    return kb.as_markup(resize_keyboard=True)
+
+def counterparty_registry_kb(counterparties: list[str]) -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardBuilder()
+    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
+    for text in base_buttons:
+        kb.add(KeyboardButton(text=text))
+    for name in counterparties[:40]:
+        kb.add(KeyboardButton(text=name))
+    _adjust_rows(kb, [2, 1], min(len(counterparties), 40))
     return kb.as_markup(resize_keyboard=True)
 
 def warehouse_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
