@@ -7,17 +7,22 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from kbeton.db.session import session_scope
-from kbeton.models.enums import Role, TxType, PriceKind, PatternType
+from kbeton.models.enums import Role, TxType, PriceKind, PatternType, InventoryTxnType
 from kbeton.models.costs import MaterialPrice, OverheadCost
 from kbeton.models.recipes import ConcreteRecipe
 from kbeton.models.finance import ImportJob, FinanceArticle, FinanceTransaction, MappingRule
 from kbeton.models.counterparty import CounterpartySnapshot, CounterpartyBalance
+from kbeton.models.production import ProductionShift, ProductionOutput, ProductionRealization
+from kbeton.models.inventory import InventoryTxn, InventoryItem
+from kbeton.models.enums import ShiftStatus, ProductType
 from kbeton.services.s3 import put_bytes
 from kbeton.services.audit import audit_log
 from kbeton.services.pricing import set_price, get_current_prices
 from kbeton.services.mapping import apply_article
+from kbeton.services.manual_finance import create_manual_finance_tx
 from kbeton.reports.pnl import pnl as pnl_calc
 from kbeton.reports.export_xlsx import pnl_to_xlsx
 from kbeton.importers.utils import norm_counterparty_name
@@ -35,6 +40,7 @@ from apps.bot.states import (
     CounterpartyUploadState,
     CounterpartyCardState,
     CounterpartyAddState,
+    RealizationState,
     ArticleAddState,
     PriceSetState,
     MappingRuleAddState,
@@ -55,6 +61,24 @@ MATERIAL_UNITS = {
     "вода": "л",
     "добавки": "л",
 }
+
+PRODUCT_TYPE_RU = {
+    ProductType.crushed_stone: "Щебень",
+    ProductType.screening: "Отсев",
+    ProductType.sand: "Песок",
+    ProductType.concrete: "Бетон",
+    ProductType.blocks: "Блоки",
+}
+
+DU_PRODUCT_TYPES = {ProductType.crushed_stone, ProductType.screening, ProductType.sand}
+
+def _product_type_label(value: ProductType | str) -> str:
+    if isinstance(value, ProductType):
+        return PRODUCT_TYPE_RU.get(value, value.value)
+    try:
+        return PRODUCT_TYPE_RU.get(ProductType(value), str(value))
+    except Exception:
+        return str(value)
 
 def _upsert_counterparty_registry_entry(name: str, actor_user_id: int | None) -> str:
     cleaned = (name or "").strip()
@@ -189,6 +213,216 @@ def _range_for(period: str) -> tuple[date, date]:
         return date(today.year, 1, 1), today
     return today, today
 
+def _bar(value: float, max_value: float, width: int = 10) -> str:
+    if max_value <= 0:
+        return "░" * width
+    filled = max(0, min(width, round((value / max_value) * width)))
+    return ("█" * filled) + ("░" * (width - filled))
+
+def _production_dashboard_summary(session, *, start: date, end: date) -> list[str]:
+    rows = (
+        session.query(ProductionShift.date, ProductionOutput.product_type, ProductionOutput.mark, ProductionOutput.quantity)
+        .join(ProductionOutput, ProductionOutput.shift_id == ProductionShift.id)
+        .filter(ProductionShift.status == ShiftStatus.approved)
+        .filter(ProductionShift.date >= start, ProductionShift.date <= end)
+        .all()
+    )
+    if not rows:
+        return ["🏭 Производство", "Нет данных за период."]
+
+    totals: dict[str, float] = {}
+    concrete_marks: dict[str, float] = {}
+    last7_start = end - timedelta(days=6)
+    daily_concrete: dict[date, float] = {last7_start + timedelta(days=i): 0.0 for i in range(7)}
+
+    for row_date, product_type, mark, qty in rows:
+        qty_f = float(qty or 0)
+        if product_type == ProductType.concrete:
+            concrete_marks[mark or "-"] = concrete_marks.get(mark or "-", 0.0) + qty_f
+            if row_date in daily_concrete:
+                daily_concrete[row_date] += qty_f
+        else:
+            key = product_type.value
+            totals[key] = totals.get(key, 0.0) + qty_f
+
+    lines = ["🏭 Производство"]
+    labels = {
+        "crushed_stone": ("Щебень", "тн"),
+        "screening": ("Отсев", "тн"),
+        "sand": ("Песок", "тн"),
+        "blocks": ("Блоки", "шт"),
+    }
+    has_any = False
+    for key in ["crushed_stone", "screening", "sand", "blocks"]:
+        if key in totals and totals[key] > 0:
+            label, uom = labels[key]
+            lines.append(f"{label}: {totals[key]:.2f} {uom}")
+            has_any = True
+
+    if concrete_marks:
+        has_any = True
+        total_concrete = sum(concrete_marks.values())
+        lines.append(f"Бетон (всего): {total_concrete:.2f} м3")
+        top_marks = sorted(concrete_marks.items(), key=lambda x: x[1], reverse=True)[:5]
+        lines.append("Марки (топ):")
+        max_mark = max((v for _, v in top_marks), default=0.0)
+        for mark_name, qty in top_marks:
+            lines.append(f"{mark_name}: {_bar(qty, max_mark, 8)} {qty:.1f}")
+
+        lines.append("Бетон за 7 дней:")
+        max_day = max(daily_concrete.values()) if daily_concrete else 0.0
+        for d in sorted(daily_concrete.keys()):
+            qty = daily_concrete[d]
+            lines.append(f"{d.strftime('%d.%m')}: {_bar(qty, max_day, 8)} {qty:.1f}")
+
+    real_rows = (
+        session.query(ProductionOutput.mark, ProductionRealization.realized_qty, ProductionRealization.total_amount)
+        .join(ProductionOutput, ProductionOutput.id == ProductionRealization.output_id)
+        .join(ProductionShift, ProductionShift.id == ProductionOutput.shift_id)
+        .filter(ProductionShift.date >= start, ProductionShift.date <= end)
+        .all()
+    )
+    if real_rows:
+        total_real_amount = sum(float(r.total_amount or 0) for r in real_rows)
+        total_real_qty = sum(float(r.realized_qty or 0) for r in real_rows)
+        lines.append(f"Реализация: {total_real_qty:.2f} ед. | {total_real_amount:.2f} KGS")
+        by_mark: dict[str, float] = {}
+        for mark, qty, _amt in real_rows:
+            by_mark[(mark or "-")] = by_mark.get((mark or "-"), 0.0) + float(qty or 0)
+        top_real = sorted(by_mark.items(), key=lambda x: x[1], reverse=True)[:5]
+        if top_real:
+            lines.append("Реализовано (топ):")
+            max_real = max((v for _, v in top_real), default=0.0)
+            for mark_name, qty in top_real:
+                lines.append(f"{mark_name}: {_bar(qty, max_real, 8)} {qty:.1f}")
+
+    if not has_any:
+        lines.append("Нет подтвержденного выпуска за период.")
+    return lines
+
+def _realization_candidates(session):
+    outputs = (
+        session.query(ProductionOutput, ProductionShift)
+        .join(ProductionShift, ProductionShift.id == ProductionOutput.shift_id)
+        .filter(ProductionShift.status == ShiftStatus.approved)
+        .order_by(ProductionShift.date.desc(), ProductionOutput.id.desc())
+        .limit(120)
+        .all()
+    )
+    realized_rows = (
+        session.query(ProductionRealization.output_id, ProductionRealization.realized_qty)
+        .all()
+    )
+    realized_map: dict[int, float] = {}
+    for output_id, qty in realized_rows:
+        realized_map[int(output_id)] = realized_map.get(int(output_id), 0.0) + float(qty or 0)
+
+    candidates = []
+    for out, shift in outputs:
+        if out.product_type in DU_PRODUCT_TYPES:
+            # Выпуск ДУ (щебень/отсев/песок) не отправляем в финансовую "Реализацию".
+            continue
+        produced = float(out.quantity or 0)
+        realized = realized_map.get(out.id, 0.0)
+        remaining = round(produced - realized, 3)
+        if remaining <= 0:
+            continue
+        ptype_ru = _product_type_label(out.product_type)
+        label = f"{shift.date.isoformat()} | смена {shift.id} | {ptype_ru} {out.mark or ''}".strip()
+        candidates.append({
+            "output_id": out.id,
+            "shift_id": shift.id,
+            "date": shift.date,
+            "product_type": ptype_ru,
+            "product_type_code": out.product_type.value,
+            "mark": out.mark or "",
+            "uom": out.uom,
+            "produced_qty": produced,
+            "realized_qty": realized,
+            "remaining_qty": remaining,
+            "counterparty_name": (shift.counterparty_name or "").strip(),
+            "label": label,
+        })
+    return candidates
+
+def _realization_item_caption(c: dict) -> str:
+    product_name = f"{c['product_type']} {c['mark'] or ''}".strip()
+    lines = [
+        f"Дата выпуска: {c['date'].isoformat()}",
+        f"Смена: #{c['shift_id']}",
+        f"Продукция: {product_name}",
+        f"Выпуск: {c['produced_qty']:.3f} {c['uom']}",
+        f"Уже реализовано: {c['realized_qty']:.3f} {c['uom']}",
+        f"Доступно к реализации: {c['remaining_qty']:.3f} {c['uom']}",
+    ]
+    if c.get("counterparty_name"):
+        lines.append(f"Контрагент (из смены): {c['counterparty_name']}")
+    return "\n".join(lines)
+
+def _realization_preview_text(meta: dict, qty: float, unit_price: float) -> str:
+    uom = meta.get("uom") or "ед."
+    product_name = f"{meta.get('product_type', '')} {meta.get('mark', '')}".strip()
+    total_amount = round(qty * unit_price, 2)
+    dt = meta.get("date")
+    dt_txt = dt.isoformat() if dt else "-"
+    return (
+        "Проверьте данные перед сохранением:\n\n"
+        f"Продукция: {product_name or '-'}\n"
+        f"Смена: #{meta.get('shift_id', '-')}\n"
+        f"Дата выпуска: {dt_txt}\n"
+        f"Объем реализации: {qty:.3f} {uom}\n"
+        f"Цена за единицу: {unit_price:.2f} KGS/{uom}\n"
+        f"Сумма реализации: {total_amount:.2f} KGS"
+    )
+
+def _pending_expense_receipts(session):
+    rows = (
+        session.query(InventoryTxn, InventoryItem)
+        .join(InventoryItem, InventoryItem.id == InventoryTxn.item_id)
+        .filter(InventoryTxn.txn_type == InventoryTxnType.receipt)
+        .filter(InventoryTxn.total_cost.isnot(None))
+        .filter(InventoryTxn.total_cost > 0)
+        .filter(InventoryTxn.finance_approval_required == True)
+        .filter(InventoryTxn.finance_txn_id.is_(None))
+        .order_by(InventoryTxn.id.desc())
+        .limit(30)
+        .all()
+    )
+    result = []
+    for txn, item in rows:
+        result.append({
+            "txn_id": txn.id,
+            "item_id": item.id,
+            "item_name": item.name,
+            "uom": item.uom,
+            "qty": float(txn.qty or 0),
+            "unit_price": float(txn.unit_price or 0),
+            "total_cost": float(txn.total_cost or 0),
+            "fact_weight": float(txn.fact_weight or 0),
+            "comment": txn.comment or "",
+            "invoice_photo_s3_key": txn.invoice_photo_s3_key or "",
+            "created_at": txn.created_at,
+        })
+    return result
+
+def _pending_expense_caption(row: dict) -> str:
+    created = row.get("created_at")
+    created_txt = created.strftime("%d.%m %H:%M") if created else "-"
+    lines = [
+        f"Заявка на расход #{row['txn_id']}",
+        f"Материал: {row['item_name']}",
+        f"Объем: {row['qty']:.3f} {row['uom']}",
+        f"Цена: {row['unit_price']:.2f} KGS/{row['uom']}",
+        f"Сумма: {row['total_cost']:.2f} KGS",
+        f"Факт вес: {row['fact_weight']:.3f}",
+        f"Дата прихода: {created_txt}",
+    ]
+    if row.get("comment"):
+        lines.append(f"Комментарий: {row['comment']}")
+    if row.get("invoice_photo_s3_key"):
+        lines.append("Накладная: фото сохранено")
+    return "\n".join(lines)
+
 def _pnl_payload(period: str):
     start, end = _range_for(period)
     with session_scope() as session:
@@ -309,6 +543,356 @@ async def counterparty_add_save(message: Message, state: FSMContext, **data):
         return
     await state.clear()
     await message.answer(f"✅ Контрагент добавлен: {saved_name}", reply_markup=finance_menu(user.role))
+
+@router.message(F.text == "💸 Реализация")
+async def realization_menu(message: Message, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    with session_scope() as session:
+        candidates = _realization_candidates(session)
+        audit_log(session, actor_user_id=user.id, action="realization_candidates_view", entity_type="production_output", entity_id="", payload={"count": len(candidates)})
+    if not candidates:
+        await message.answer(
+            "💸 Реализация\n\n"
+            "Нет доступных позиций для продажи.\n"
+            "Позиции появятся после согласования смены производства."
+        )
+        return
+    b = InlineKeyboardBuilder()
+    lines = [
+        "💸 Реализация",
+        "",
+        "Выберите позицию из согласованного выпуска.",
+        "Показываются только позиции с остатком к реализации.",
+        f"Доступно позиций: {len(candidates)}",
+        "",
+        "Список (первые 20):",
+    ]
+    for c in candidates[:20]:
+        text = f"{c['date'].isoformat()} | смена #{c['shift_id']} | {c['product_type']} {c['mark'] or '-'} | остаток {c['remaining_qty']:.3f} {c['uom']}"
+        if c["counterparty_name"]:
+            text += f" | {c['counterparty_name']}"
+        lines.append(f"- {text}")
+        button_text = f"Смена #{c['shift_id']} • {c['mark'] or c['product_type']} • {c['remaining_qty']:.1f} {c['uom']}"
+        b.button(text=button_text[:64], callback_data=f"realize_pick:{c['output_id']}")
+    b.adjust(1)
+    await message.answer("\n".join(lines), reply_markup=b.as_markup())
+
+@router.message(F.text == "✅ Согласование расходов")
+async def expense_approval_menu(message: Message, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    with session_scope() as session:
+        rows = _pending_expense_receipts(session)
+        audit_log(
+            session,
+            actor_user_id=user.id,
+            action="inventory_expense_approval_queue_view",
+            entity_type="inventory_txn",
+            entity_id="",
+            payload={"count": len(rows)},
+        )
+    if not rows:
+        await message.answer(
+            "✅ Согласование расходов\n\n"
+            "Нет заявок на согласование.\n"
+            "Они появятся после складского прихода с ценой/суммой."
+        )
+        return
+    b = InlineKeyboardBuilder()
+    lines = [
+        "✅ Согласование расходов",
+        "",
+        "Ниже заявки из склада (приходы), которые еще не проведены в P&L.",
+        f"Ожидает согласования: {len(rows)}",
+        "",
+        "Список (первые 30):",
+    ]
+    for r in rows:
+        lines.append(
+            f"- #{r['txn_id']} {r['item_name']}: {r['qty']:.3f} {r['uom']} × {r['unit_price']:.2f} = {r['total_cost']:.2f} KGS"
+        )
+        b.button(
+            text=f"#{r['txn_id']} {r['item_name']} • {r['total_cost']:.0f} KGS"[:64],
+            callback_data=f"invexp_pick:{r['txn_id']}",
+        )
+    b.adjust(1)
+    await message.answer("\n".join(lines), reply_markup=b.as_markup())
+
+@router.callback_query(F.data.startswith("invexp_pick:"))
+async def expense_approval_pick(call: CallbackQuery, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    txn_id = int(call.data.split(":")[1])
+    with session_scope() as session:
+        rows = _pending_expense_receipts(session)
+    selected = next((r for r in rows if r["txn_id"] == txn_id), None)
+    if not selected:
+        await call.message.answer("Заявка уже согласована или не найдена.")
+        await call.answer()
+        return
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Согласовать расход", callback_data=f"invexp_approve:{txn_id}")
+    b.button(text="↩️ К списку", callback_data="invexp_back:list")
+    b.adjust(1)
+    await call.message.answer(_pending_expense_caption(selected), reply_markup=b.as_markup())
+    await call.answer()
+
+@router.callback_query(F.data == "invexp_back:list")
+async def expense_approval_back_list(call: CallbackQuery, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    await call.answer()
+    await expense_approval_menu(call.message, **data)
+
+@router.callback_query(F.data.startswith("invexp_approve:"))
+async def expense_approval_approve(call: CallbackQuery, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    txn_id = int(call.data.split(":")[1])
+    with session_scope() as session:
+        row = (
+            session.query(InventoryTxn, InventoryItem)
+            .join(InventoryItem, InventoryItem.id == InventoryTxn.item_id)
+            .filter(InventoryTxn.id == txn_id)
+            .one_or_none()
+        )
+        if row is None:
+            await call.message.answer("Заявка не найдена.")
+            await call.answer()
+            return
+        txn, item = row
+        if txn.txn_type != InventoryTxnType.receipt:
+            await call.message.answer("Это не заявка на приход.")
+            await call.answer()
+            return
+        if txn.finance_txn_id is not None:
+            await call.message.answer("Эта заявка уже согласована и проведена в P&L.")
+            await call.answer()
+            return
+        total_cost = float(txn.total_cost or 0)
+        if total_cost <= 0:
+            await call.message.answer("У заявки нет суммы расхода для проведения.")
+            await call.answer()
+            return
+
+        fin_tx = create_manual_finance_tx(
+            session,
+            tx_date=datetime.now().date(),
+            amount=total_cost,
+            tx_type=TxType.expense,
+            description=f"Склад приход (согласован): {item.name}",
+            counterparty="",
+            actor_user_id=user.id,
+            article_name="Закупка материалов (склад)",
+            raw_fields={
+                "source": "inventory_receipt_approved",
+                "inventory_txn_id": txn.id,
+                "inventory_item_id": item.id,
+                "qty": float(txn.qty or 0),
+                "unit_price": float(txn.unit_price or 0),
+                "total_cost": total_cost,
+                "fact_weight": float(txn.fact_weight or 0),
+            },
+        )
+        txn.finance_txn_id = fin_tx.id
+        txn.finance_approval_required = False
+        txn.expense_approved_by_user_id = user.id
+        txn.expense_approved_at = datetime.now().astimezone()
+        audit_log(
+            session,
+            actor_user_id=user.id,
+            action="inventory_expense_approved",
+            entity_type="inventory_txn",
+            entity_id=str(txn.id),
+            payload={"finance_txn_id": fin_tx.id, "total_cost": total_cost},
+        )
+        item_name = item.name
+        qty = float(txn.qty or 0)
+        uom = item.uom
+        unit_price = float(txn.unit_price or 0)
+
+    await call.message.answer(
+        "✅ Расход согласован и проведен в P&L\n"
+        f"Материал: {item_name}\n"
+        f"Объем: {qty:.3f} {uom}\n"
+        f"Цена: {unit_price:.2f} KGS/{uom}\n"
+        f"Сумма: {total_cost:.2f} KGS",
+        reply_markup=finance_menu(user.role),
+    )
+    await call.answer()
+
+@router.callback_query(F.data.startswith("realize_pick:"))
+async def realization_pick(call: CallbackQuery, state: FSMContext, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    output_id = int(call.data.split(":")[1])
+    with session_scope() as session:
+        candidates = _realization_candidates(session)
+    selected = next((c for c in candidates if c["output_id"] == output_id), None)
+    if not selected:
+        await call.message.answer("Эта позиция уже полностью реализована или не найдена.")
+        await call.answer()
+        return
+    await state.update_data(realize_output_id=output_id, realize_meta=selected)
+    await state.set_state(RealizationState.waiting_qty)
+    await call.message.answer(
+        "Вы выбрали позицию для реализации:\n\n"
+        f"{_realization_item_caption(selected)}\n\n"
+        f"Шаг 1/2: Введите объем реализации в {selected['uom']}.\n"
+        "Пример: 12.5"
+    )
+    await call.answer()
+
+@router.message(RealizationState.waiting_qty)
+async def realization_qty(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    try:
+        qty = float((message.text or "").strip().replace(",", "."))
+    except ValueError:
+        await message.answer("Нужно число (объем реализации).")
+        return
+    st = await state.get_data()
+    meta = st.get("realize_meta") or {}
+    remaining = float(meta.get("remaining_qty") or 0)
+    if qty <= 0:
+        await message.answer("Объем должен быть больше 0.")
+        return
+    if remaining and qty > remaining:
+        await message.answer(
+            f"Нельзя больше доступного остатка: {remaining:.3f} {meta.get('uom') or ''}\n"
+            "Введите меньшее значение."
+        )
+        return
+    await state.update_data(realize_qty=qty)
+    await state.set_state(RealizationState.waiting_unit_price)
+    await message.answer(
+        f"Шаг 2/2: Введите цену реализации за 1 {meta.get('uom') or 'ед.'} (KGS).\n"
+        "Пример: 4200"
+    )
+
+@router.message(RealizationState.waiting_unit_price)
+async def realization_price(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    try:
+        unit_price = float((message.text or "").strip().replace(",", "."))
+    except ValueError:
+        await message.answer("Нужно число (цена за единицу).")
+        return
+    if unit_price <= 0:
+        await message.answer("Цена должна быть больше 0.")
+        return
+    st = await state.get_data()
+    meta = st.get("realize_meta") or {}
+    qty = float(st["realize_qty"])
+    total_amount = round(qty * unit_price, 2)
+    await state.update_data(realize_unit_price=unit_price, realize_total_amount=total_amount)
+    await state.set_state(RealizationState.waiting_confirm)
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Сохранить реализацию", callback_data="realize_confirm:save")
+    b.button(text="✏️ Изменить цену", callback_data="realize_confirm:edit_price")
+    b.button(text="↩️ Изменить объем", callback_data="realize_confirm:edit_qty")
+    b.button(text="❌ Отмена", callback_data="realize_confirm:cancel")
+    b.adjust(1, 2, 1)
+    await message.answer(_realization_preview_text(meta, qty, unit_price), reply_markup=b.as_markup())
+
+@router.callback_query(F.data.startswith("realize_confirm:"))
+async def realization_confirm_action(call: CallbackQuery, state: FSMContext, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin, Role.FinDir})
+    action = (call.data or "").split(":", 1)[1]
+    st = await state.get_data()
+
+    if action == "cancel":
+        await state.clear()
+        await call.message.answer("Реализация отменена.", reply_markup=finance_menu(user.role))
+        await call.answer()
+        return
+    if action == "edit_qty":
+        meta = st.get("realize_meta") or {}
+        await state.set_state(RealizationState.waiting_qty)
+        await call.message.answer(
+            f"Введите новый объем реализации (доступно: {float(meta.get('remaining_qty') or 0):.3f} {meta.get('uom') or ''})."
+        )
+        await call.answer()
+        return
+    if action == "edit_price":
+        meta = st.get("realize_meta") or {}
+        await state.set_state(RealizationState.waiting_unit_price)
+        await call.message.answer(f"Введите новую цену за 1 {meta.get('uom') or 'ед.'} (KGS).")
+        await call.answer()
+        return
+    if action != "save":
+        await call.answer()
+        return
+
+    try:
+        output_id = int(st["realize_output_id"])
+        qty = float(st["realize_qty"])
+        unit_price = float(st["realize_unit_price"])
+    except (KeyError, TypeError, ValueError):
+        await state.clear()
+        await call.message.answer(
+            "Сессия реализации устарела. Откройте `💸 Реализация` заново.",
+            reply_markup=finance_menu(user.role),
+        )
+        await call.answer()
+        return
+
+    total_amount = round(qty * unit_price, 2)
+    with session_scope() as session:
+        out = session.query(ProductionOutput).filter(ProductionOutput.id == output_id).one()
+        shift = session.query(ProductionShift).filter(ProductionShift.id == out.shift_id).one()
+        product_type_ru = _product_type_label(out.product_type)
+        already_realized = sum(
+            float(r.realized_qty or 0)
+            for r in session.query(ProductionRealization).filter(ProductionRealization.output_id == out.id).all()
+        )
+        remaining_now = float(out.quantity or 0) - already_realized
+        if qty > round(remaining_now, 6):
+            await state.clear()
+            await call.message.answer(
+                f"Позиция изменилась. Доступно сейчас: {remaining_now:.3f} {out.uom}. Откройте `💸 Реализация` заново.",
+                reply_markup=finance_menu(user.role),
+            )
+            await call.answer()
+            return
+        fin_tx = create_manual_finance_tx(
+            session,
+            tx_date=date.today(),
+            amount=total_amount,
+            tx_type=TxType.income,
+            description=f"Реализация: {product_type_ru} {out.mark or ''} / смена {shift.id}",
+            counterparty=(shift.counterparty_name or "").strip(),
+            actor_user_id=user.id,
+            article_name="Реализация продукции",
+            raw_fields={"source": "production_realization", "output_id": out.id, "shift_id": shift.id, "qty": qty, "unit_price": unit_price},
+        )
+        real = ProductionRealization(
+            output_id=out.id,
+            realized_qty=qty,
+            unit_price=unit_price,
+            total_amount=total_amount,
+            finance_txn_id=fin_tx.id,
+            created_by_user_id=user.id,
+        )
+        session.add(real)
+        session.flush()
+        audit_log(session, actor_user_id=user.id, action="production_realized", entity_type="production_realization", entity_id=str(real.id), payload={"output_id": out.id, "qty": qty, "unit_price": unit_price, "total_amount": total_amount})
+        uom = out.uom
+        product_label = f"{product_type_ru} {out.mark or ''}".strip()
+    await state.clear()
+    await call.message.answer(
+        f"✅ Реализация сохранена\n"
+        f"{product_label}: {qty:.3f} {uom}\n"
+        f"Цена: {unit_price:.3f} KGS/{uom}\n"
+        f"Сумма: {total_amount:.2f} KGS\n\n"
+        "Сумма добавлена в финансы и попадет в P&L/дашборд.",
+        reply_markup=finance_menu(user.role),
+    )
+    await call.answer()
 
 @router.message(F.text == "📄 P&L")
 async def pnl_prompt(message: Message, **data):
@@ -795,15 +1379,19 @@ async def dashboard_quick(message: Message, **data):
     start, end = _range_for("month")
     with session_scope() as session:
         rows, meta = pnl_calc(session, start=start, end=end, period="day")
+        prod_lines = _production_dashboard_summary(session, start=start, end=end)
         audit_log(session, actor_user_id=user.id, action="dashboard_view", entity_type="pnl", entity_id="month", payload={"period": "month"})
-    await message.answer(
-        f"📊 Дашборд\n"
-        f"Текущий месяц: {start.isoformat()} → {end.isoformat()}\n"
-        f"Доход: {meta['total_income']:.2f}\n"
-        f"Расход: {meta['total_expense']:.2f}\n"
-        f"Чистая прибыль: {meta['total_net']:.2f}\n"
-        f"Неразобранное: {meta.get('unknown_count', 0)}"
-    )
+    lines = [
+        "📊 Дашборд",
+        f"Текущий месяц: {start.isoformat()} → {end.isoformat()}",
+        f"Доход: {meta['total_income']:.2f}",
+        f"Расход: {meta['total_expense']:.2f}",
+        f"Чистая прибыль: {meta['total_net']:.2f}",
+        f"Неразобранное: {meta.get('unknown_count', 0)}",
+        "",
+        *prod_lines,
+    ]
+    await message.answer("\n".join(lines))
 
 @router.message(F.text == "Контрагенты/Задолженность (снимки)")
 async def cp_report(message: Message, state: FSMContext, **data):

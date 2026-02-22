@@ -37,3 +37,17 @@ class ProductionOutput(Base):
     mark: Mapped[str] = mapped_column(String(50), nullable=False, default="")  # for concrete
 
     shift = relationship("ProductionShift", back_populates="outputs")
+    realizations = relationship("ProductionRealization", back_populates="output", cascade="all, delete-orphan")
+
+class ProductionRealization(Base):
+    __tablename__ = "production_realizations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    output_id: Mapped[int] = mapped_column(Integer, ForeignKey("production_outputs.id", ondelete="CASCADE"), nullable=False)
+    realized_qty: Mapped[float] = mapped_column(Numeric(14, 3), nullable=False, default=0)
+    unit_price: Mapped[float] = mapped_column(Numeric(14, 3), nullable=False, default=0)
+    total_amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    finance_txn_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("finance_transactions.id", ondelete="SET NULL"), nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    output = relationship("ProductionOutput", back_populates="realizations")

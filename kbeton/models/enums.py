@@ -36,6 +36,7 @@ class ProductType(str, Enum):
     blocks = "blocks"
 
 class InventoryTxnType(str, Enum):
+    receipt = "receipt"
     issue = "issue"
     writeoff = "writeoff"
     adjustment = "adjustment"

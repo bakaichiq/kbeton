@@ -25,6 +25,9 @@ def main_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
         buttons.append("📊 Дашборд")
     if _role_allowed(role, {Role.Admin, Role.FinDir, Role.Viewer}):
         buttons.append("💰 Финансы")
+    if _role_allowed(role, {Role.Admin, Role.FinDir}):
+        buttons.append("💸 Реализация")
+        buttons.append("✅ Согласование расходов")
     if _role_allowed(role, {Role.Admin, Role.Operator, Role.HeadProd}):
         buttons.append("🏭 Производство")
     if _role_allowed(role, {Role.Admin, Role.Warehouse, Role.Viewer}):
@@ -51,6 +54,7 @@ def finance_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
         action_buttons.append("Контрагенты/Задолженность (снимки)")
         action_buttons.append("📊 Себестоимость бетона")
     if _role_allowed(role, {Role.Admin, Role.FinDir}):
+        action_buttons.append("💸 Реализация")
         action_buttons.append("🧾 Статьи доходов")
         action_buttons.append("🧾 Статьи расходов")
         action_buttons.append("🧩 Неразобранное")
@@ -139,6 +143,7 @@ def warehouse_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
         kb.add(KeyboardButton(text=text))
     action_buttons: list[str] = []
     if _role_allowed(role, {Role.Admin, Role.Warehouse}):
+        action_buttons.append("📥 Приход")
         action_buttons.append("📤 Выдать расходник")
         action_buttons.append("🗑️ Списать")
         action_buttons.append("🧮 Инвентаризация")

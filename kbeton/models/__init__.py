@@ -9,7 +9,7 @@ from kbeton.models.finance import (
     FinanceTransaction,
 )
 from kbeton.models.pricing import PriceVersion
-from kbeton.models.production import ProductionShift, ProductionOutput
+from kbeton.models.production import ProductionShift, ProductionOutput, ProductionRealization
 from kbeton.models.inventory import InventoryItem, InventoryBalance, InventoryTxn
 from kbeton.models.counterparty import CounterpartySnapshot, CounterpartyBalance
 from kbeton.models.recipes import ConcreteRecipe

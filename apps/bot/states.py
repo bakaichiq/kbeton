@@ -10,6 +10,11 @@ class CounterpartyCardState(StatesGroup):
 class CounterpartyAddState(StatesGroup):
     waiting_name = State()
 
+class RealizationState(StatesGroup):
+    waiting_qty = State()
+    waiting_unit_price = State()
+    waiting_confirm = State()
+
 class ArticleAddState(StatesGroup):
     waiting_name = State()
 
@@ -47,9 +52,12 @@ class ShiftReportState(StatesGroup):
 class InventoryTxnState(StatesGroup):
     waiting_item = State()
     waiting_qty = State()
+    waiting_unit_price = State()
+    waiting_fact_weight = State()
     waiting_receiver = State()
     waiting_department = State()
     waiting_comment = State()
+    waiting_invoice_photo = State()
 
 class InventoryAdjustState(StatesGroup):
     waiting_item = State()
