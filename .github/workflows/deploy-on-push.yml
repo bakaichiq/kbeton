@@ -32,5 +32,13 @@ jobs:
           git pull --ff-only origin main
           docker build -f docker/Dockerfile.base -t kbeton-base:latest .
           docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-          curl --fail --silent http://127.0.0.1:8000/health
+          for attempt in $(seq 1 24); do
+            if curl --fail --silent http://127.0.0.1:8000/health; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker compose ps
+          docker compose logs --tail=100 api
+          exit 1
           EOF
