@@ -4,10 +4,16 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Configure SSH key
         run: |
@@ -18,9 +24,13 @@ jobs:
 
       - name: Deploy on remote host
         run: |
-          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
+          ssh -o StrictHostKeyChecking=yes "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
           set -euo pipefail
           cd "${{ secrets.DEPLOY_PATH }}"
-          git pull origin main
-          docker compose up -d --build
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          docker build -f docker/Dockerfile.base -t kbeton-base:latest .
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+          curl --fail --silent http://127.0.0.1:8000/health
           EOF

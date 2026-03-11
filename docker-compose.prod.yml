@@ -1,0 +1,15 @@
+services:
+  postgres:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  minio:
+    ports: !override
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+
+  api:
+    ports: !override
+      - "127.0.0.1:8000:8000"

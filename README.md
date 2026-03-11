@@ -183,4 +183,6 @@ docker compose logs -f worker
 
 - установлен Docker + Docker Compose
 - репозиторий уже склонирован в `DEPLOY_PATH`
+- в корне репозитория на сервере уже создан production `.env`
+- деплой выполняется через `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build`
 - SSH доступ разрешен
