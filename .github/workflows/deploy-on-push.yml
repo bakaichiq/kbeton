@@ -24,21 +24,15 @@ jobs:
 
       - name: Deploy on remote host
         run: |
-          ssh -o StrictHostKeyChecking=yes "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
-          set -euo pipefail
+          ssh -o StrictHostKeyChecking=yes "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" 'bash -se' << 'EOF'
+          set -Eeuo pipefail
+          trap 'docker compose -f docker-compose.yml -f docker-compose.prod.yml ps || true; docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=100 api || true' ERR
           cd "${{ secrets.DEPLOY_PATH }}"
           git fetch origin main
           git checkout main
           git pull --ff-only origin main
           docker build -f docker/Dockerfile.base -t kbeton-base:latest .
           docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-          for attempt in $(seq 1 24); do
-            if curl --fail --silent http://127.0.0.1:8000/health; then
-              exit 0
-            fi
-            sleep 5
-          done
-          docker compose ps
-          docker compose logs --tail=100 api
-          exit 1
+          timeout 120 bash -lc 'until curl --fail --silent http://127.0.0.1:8000/health >/dev/null; do sleep 5; done'
+          curl --fail --silent http://127.0.0.1:8000/health
           EOF
