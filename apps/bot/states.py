@@ -67,6 +67,7 @@ class InventoryAdjustState(StatesGroup):
 class AdminSetRoleState(StatesGroup):
     waiting_tg_id = State()
     waiting_role = State()
+    waiting_confirm = State()
 
 class ConcreteRecipeState(StatesGroup):
     waiting_mark = State()
@@ -76,6 +77,7 @@ class ConcreteRecipeState(StatesGroup):
     waiting_screening = State()
     waiting_water = State()
     waiting_additives = State()
+    waiting_confirm = State()
 
 class InviteLinkState(StatesGroup):
     waiting_role = State()

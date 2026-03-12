@@ -198,6 +198,7 @@ class TestAdminStates:
         """Состояния назначения роли."""
         assert AdminSetRoleState.waiting_tg_id is not None
         assert AdminSetRoleState.waiting_role is not None
+        assert AdminSetRoleState.waiting_confirm is not None
 
     def test_concrete_recipe_states(self):
         """Состояния рецептуры бетона."""
@@ -209,6 +210,7 @@ class TestAdminStates:
             ConcreteRecipeState.waiting_screening,
             ConcreteRecipeState.waiting_water,
             ConcreteRecipeState.waiting_additives,
+            ConcreteRecipeState.waiting_confirm,
         ]
         
         for state in states:

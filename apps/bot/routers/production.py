@@ -39,6 +39,7 @@ from apps.bot.keyboards import (
     shift_report_operator_kb,
 )
 from apps.bot.states import ShiftCloseState, ShiftApprovalState, ShiftReportState
+from apps.bot.ui import preview_text, section_text, wizard_text
 from apps.bot.utils import get_db_user, ensure_role
 from kbeton.reports.production_xlsx import production_shifts_to_xlsx
 
@@ -59,7 +60,10 @@ async def close_shift_start(message: Message, state: FSMContext, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.Operator})
     await state.set_state(ShiftCloseState.waiting_shift_type)
-    await message.answer("Смена:", reply_markup=shift_type_kb())
+    await message.answer(
+        wizard_text("Закрытие смены", step=1, total=6, body_lines=["Выберите тип смены."]),
+        reply_markup=shift_type_kb(),
+    )
 
 @router.message(ShiftCloseState.waiting_shift_type)
 async def close_shift_shift_type(message: Message, state: FSMContext, **data):
@@ -71,7 +75,10 @@ async def close_shift_shift_type(message: Message, state: FSMContext, **data):
         return
     await state.update_data(shift_type=t)
     await state.set_state(ShiftCloseState.waiting_line_type)
-    await message.answer("Линия:", reply_markup=line_type_kb())
+    await message.answer(
+        wizard_text("Закрытие смены", step=2, total=6, body_lines=[f"Смена: {t}", "Выберите линию."]),
+        reply_markup=line_type_kb(),
+    )
 
 @router.message(ShiftCloseState.waiting_line_type)
 async def close_shift_line_type(message: Message, state: FSMContext, **data):
@@ -86,7 +93,7 @@ async def close_shift_line_type(message: Message, state: FSMContext, **data):
     await state.update_data(line_type=line_type)
     if line_type == "du":
         await state.set_state(ShiftCloseState.waiting_crushed)
-        await message.answer("Выпуск щебня (тонн, число):")
+        await message.answer(wizard_text("Закрытие смены ДУ", step=3, total=6, body_lines=["Введите выпуск щебня в тоннах."]))
     else:
         counterparties = _get_counterparty_registry()
         if not counterparties:
@@ -98,7 +105,7 @@ async def close_shift_line_type(message: Message, state: FSMContext, **data):
             return
         await state.set_state(ShiftCloseState.waiting_counterparty)
         await message.answer(
-            "Выберите контрагента из реестра:",
+            wizard_text("Закрытие смены РБУ", step=3, total=7, body_lines=["Выберите контрагента из реестра."]),
             reply_markup=counterparty_registry_kb(counterparties),
         )
 
@@ -115,9 +122,15 @@ async def close_shift_counterparty(message: Message, state: FSMContext, **data):
     await state.set_state(ShiftCloseState.waiting_concrete_mark)
     marks = _get_concrete_marks()
     if not marks:
-        await message.answer("Марки бетона не найдены. Добавьте цены или введите марку текстом.", reply_markup=concrete_mark_kb([]))
+        await message.answer(
+            wizard_text("Закрытие смены РБУ", step=4, total=7, body_lines=["Марки бетона не найдены. Можно ввести вручную или добавить цены."]),
+            reply_markup=concrete_mark_kb([]),
+        )
     else:
-        await message.answer("Выберите марку бетона:", reply_markup=concrete_mark_kb(marks))
+        await message.answer(
+            wizard_text("Закрытие смены РБУ", step=4, total=7, body_lines=["Выберите марку бетона."]),
+            reply_markup=concrete_mark_kb(marks),
+        )
 
 @router.message(ShiftCloseState.waiting_crushed)
 async def close_shift_crushed(message: Message, state: FSMContext, **data):
@@ -128,7 +141,7 @@ async def close_shift_crushed(message: Message, state: FSMContext, **data):
         return
     await state.update_data(crushed=qty)
     await state.set_state(ShiftCloseState.waiting_screening)
-    await message.answer("Выпуск отсева (тонн, число):")
+    await message.answer(wizard_text("Закрытие смены ДУ", step=4, total=6, body_lines=["Введите выпуск отсева в тоннах."]))
 
 @router.message(ShiftCloseState.waiting_screening)
 async def close_shift_screening(message: Message, state: FSMContext, **data):
@@ -139,7 +152,7 @@ async def close_shift_screening(message: Message, state: FSMContext, **data):
         return
     await state.update_data(screening=qty)
     await state.set_state(ShiftCloseState.waiting_sand)
-    await message.answer("Выпуск песка (тонн, число):")
+    await message.answer(wizard_text("Закрытие смены ДУ", step=5, total=6, body_lines=["Введите выпуск песка в тоннах."]))
 
 @router.message(ShiftCloseState.waiting_sand)
 async def close_shift_sand(message: Message, state: FSMContext, **data):
@@ -150,7 +163,7 @@ async def close_shift_sand(message: Message, state: FSMContext, **data):
         return
     await state.update_data(sand=qty)
     await state.set_state(ShiftCloseState.waiting_comment)
-    await message.answer("Комментарий/простои (можно пусто, отправьте '-' если нет):")
+    await message.answer(wizard_text("Закрытие смены ДУ", step=6, total=6, body_lines=["Введите комментарий или отправьте '-'."], hint="После этого будет экран подтверждения."))
 
 @router.message(ShiftCloseState.waiting_concrete_mark)
 async def close_shift_concrete_mark(message: Message, state: FSMContext, **data):
@@ -158,7 +171,7 @@ async def close_shift_concrete_mark(message: Message, state: FSMContext, **data)
     if mark == "0":
         await state.update_data(concrete=[])
         await state.set_state(ShiftCloseState.waiting_comment)
-        await message.answer("Комментарий/простои (можно пусто, отправьте '-' если нет):")
+        await message.answer(wizard_text("Закрытие смены РБУ", step=6, total=7, body_lines=["Введите комментарий или отправьте '-'."], hint="После этого будет экран подтверждения."))
         return
     marks = _get_concrete_marks()
     if marks and mark not in marks:
@@ -166,7 +179,7 @@ async def close_shift_concrete_mark(message: Message, state: FSMContext, **data)
         return
     await state.update_data(concrete_mark=mark)
     await state.set_state(ShiftCloseState.waiting_concrete_qty)
-    await message.answer(f"Объем бетона для {mark} (м3, число):")
+    await message.answer(wizard_text("Закрытие смены РБУ", step=5, total=7, body_lines=[f"Марка: {mark}", "Введите объем бетона в м3."]))
 
 @router.message(ShiftCloseState.waiting_concrete_qty)
 async def close_shift_concrete_qty(message: Message, state: FSMContext, **data):
@@ -182,7 +195,10 @@ async def close_shift_concrete_qty(message: Message, state: FSMContext, **data):
         conc.append((mark, qty))
     await state.update_data(concrete=conc)
     await state.set_state(ShiftCloseState.waiting_concrete_more)
-    await message.answer("Еще марка?", reply_markup=concrete_more_kb())
+    await message.answer(
+        wizard_text("Закрытие смены РБУ", step=5, total=7, body_lines=[f"Добавлено марок: {len(conc)}", "Нужна еще одна марка бетона?"]),
+        reply_markup=concrete_more_kb(),
+    )
 
 @router.message(ShiftCloseState.waiting_concrete_more)
 async def close_shift_concrete_more(message: Message, state: FSMContext, **data):
@@ -191,13 +207,13 @@ async def close_shift_concrete_more(message: Message, state: FSMContext, **data)
         await state.set_state(ShiftCloseState.waiting_concrete_mark)
         marks = _get_concrete_marks()
         if not marks:
-            await message.answer("Введите марку бетона текстом:", reply_markup=concrete_mark_kb([]))
+            await message.answer(wizard_text("Закрытие смены РБУ", step=4, total=7, body_lines=["Введите следующую марку бетона."]), reply_markup=concrete_mark_kb([]))
         else:
-            await message.answer("Выберите марку бетона:", reply_markup=concrete_mark_kb(marks))
+            await message.answer(wizard_text("Закрытие смены РБУ", step=4, total=7, body_lines=["Выберите следующую марку бетона."]), reply_markup=concrete_mark_kb(marks))
         return
     if "готов" in t:
         await state.set_state(ShiftCloseState.waiting_comment)
-        await message.answer("Комментарий/простои (можно пусто, отправьте '-' если нет):")
+        await message.answer(wizard_text("Закрытие смены РБУ", step=6, total=7, body_lines=["Введите комментарий или отправьте '-'."], hint="После этого будет экран подтверждения."))
         return
     await message.answer("Выберите действие: 'Еще марка' или 'Готово'.", reply_markup=concrete_more_kb())
 
@@ -210,9 +226,9 @@ async def close_shift_finish(message: Message, state: FSMContext, **data):
         comment = ""
     await state.update_data(comment=comment)
     st = await state.get_data()
-    lines = ["Проверьте данные перед отправкой:"] + _build_shift_summary(st)
+    lines = _build_shift_summary(st)
     await state.set_state(ShiftCloseState.waiting_confirm)
-    await message.answer("\n".join(lines), reply_markup=yes_no_kb("shift_confirm"))
+    await message.answer(preview_text("Проверьте смену перед отправкой", lines), reply_markup=yes_no_kb("shift_confirm"))
 
 @router.callback_query(F.data.startswith("shift_confirm:"))
 async def shift_confirm(call: CallbackQuery, state: FSMContext, **data):
@@ -308,6 +324,7 @@ async def shifts_pending(message: Message, **data):
         if not shifts:
             await message.answer("Нет смен на согласование.")
             return
+        await message.answer(section_text("Смены на согласование", [f"Показано: {len(shifts)}"], icon="📝"))
         for s in shifts:
             b = InlineKeyboardBuilder()
             b.button(text="✅ Согласовать", callback_data=f"shift:approve:{s.id}")
@@ -320,7 +337,7 @@ async def shifts_pending(message: Message, **data):
 async def production_kpi(message: Message, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.HeadProd, Role.Viewer})
-    await message.answer("Выберите период отчета:", reply_markup=production_period_kb())
+    await message.answer(section_text("Выпуск / KPI", ["Выберите период отчета кнопкой."], icon="📈"), reply_markup=production_period_kb())
 
 @router.callback_query(F.data.startswith("prod_kpi:"))
 async def production_kpi_period(call: CallbackQuery, **data):
@@ -374,7 +391,7 @@ async def shifts_report_start(message: Message, state: FSMContext, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.HeadProd, Role.Viewer})
     await state.set_state(ShiftReportState.waiting_period)
-    await message.answer("Период отчета:", reply_markup=shift_report_period_kb())
+    await message.answer(wizard_text("Отчет по сменам", step=1, total=3, body_lines=["Выберите период отчета."]), reply_markup=shift_report_period_kb())
 
 @router.message(ShiftReportState.waiting_period)
 async def shifts_report_period(message: Message, state: FSMContext, **data):
@@ -387,7 +404,7 @@ async def shifts_report_period(message: Message, state: FSMContext, **data):
         return
     await state.update_data(period=period_map[t])
     await state.set_state(ShiftReportState.waiting_line)
-    await message.answer("Линия:", reply_markup=shift_report_line_kb())
+    await message.answer(wizard_text("Отчет по сменам", step=2, total=3, body_lines=["Выберите линию."]), reply_markup=shift_report_line_kb())
 
 @router.message(ShiftReportState.waiting_line)
 async def shifts_report_line(message: Message, state: FSMContext, **data):
@@ -424,7 +441,7 @@ async def shifts_report_line(message: Message, state: FSMContext, **data):
         ops = session.query(User).filter(User.id.in_(op_ids)).all() if op_ids else []
         labels = [f"ID {u.id}: {u.full_name or u.tg_id}" for u in ops]
     await state.set_state(ShiftReportState.waiting_operator)
-    await message.answer("Оператор:", reply_markup=shift_report_operator_kb(labels))
+    await message.answer(wizard_text("Отчет по сменам", step=3, total=3, body_lines=["Выберите оператора или 'Все'."]), reply_markup=shift_report_operator_kb(labels))
 
 @router.message(ShiftReportState.waiting_operator)
 async def shifts_report_operator(message: Message, state: FSMContext, **data):

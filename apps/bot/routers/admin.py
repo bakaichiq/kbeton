@@ -15,8 +15,16 @@ from kbeton.services.audit import audit_log
 from kbeton.services.invites import create_user_invite
 
 from apps.bot.states import AdminSetRoleState, ConcreteRecipeState, InviteLinkState
+from apps.bot.ui import preview_text, section_text, wizard_text
 from apps.bot.utils import get_db_user, ensure_role
-from apps.bot.keyboards import concrete_recipe_mark_kb, CONCRETE_RECIPE_MARKS, invite_role_kb, INVITE_ROLE_OPTIONS
+from apps.bot.keyboards import (
+    admin_role_kb,
+    concrete_recipe_mark_kb,
+    CONCRETE_RECIPE_MARKS,
+    invite_role_kb,
+    INVITE_ROLE_OPTIONS,
+    yes_no_kb,
+)
 
 router = Router()
 
@@ -32,12 +40,13 @@ async def users_roles(message: Message, state: FSMContext, **data):
     ensure_role(user, {Role.Admin})
     with session_scope() as session:
         users = session.query(User).order_by(User.id.desc()).limit(50).all()
-    lines = ["👤 Пользователи (последние 50):"]
+    lines = ["Последние 50 пользователей:"]
     for u in users:
         lines.append(f"- tg_id={u.tg_id} | {u.full_name} | role={u.role.value} | active={u.is_active}")
-    lines.append("\nЧтобы изменить роль: отправьте tg_id (число).")
+    lines.append("")
+    lines.append("Чтобы изменить роль: отправьте tg_id.")
     await state.set_state(AdminSetRoleState.waiting_tg_id)
-    await message.answer("\n".join(lines))
+    await message.answer(section_text("Пользователи и роли", lines, icon="👤", hint="Введите tg_id пользователя."))
 
 @router.message(AdminSetRoleState.waiting_tg_id)
 async def set_role_tg(message: Message, state: FSMContext, **data):
@@ -50,7 +59,16 @@ async def set_role_tg(message: Message, state: FSMContext, **data):
         return
     await state.update_data(target_tg_id=tg_id)
     await state.set_state(AdminSetRoleState.waiting_role)
-    await message.answer("Введите роль: Admin | FinDir | HeadProd | Operator | Warehouse | Viewer")
+    await message.answer(
+        wizard_text(
+            "Назначение роли",
+            step=2,
+            total=3,
+            body_lines=[f"TG ID: {tg_id}", "Выберите роль кнопкой."],
+            hint="После этого бот покажет карточку подтверждения.",
+        ),
+        reply_markup=admin_role_kb(),
+    )
 
 @router.message(AdminSetRoleState.waiting_role)
 async def set_role_role(message: Message, state: FSMContext, **data):
@@ -60,10 +78,37 @@ async def set_role_role(message: Message, state: FSMContext, **data):
     try:
         role = Role(role_txt)
     except Exception:
-        await message.answer("Неизвестная роль. Допустимо: Admin | FinDir | HeadProd | Operator | Warehouse | Viewer")
+        await message.answer("Выберите роль кнопкой.", reply_markup=admin_role_kb())
         return
     st = await state.get_data()
     tg_id = int(st["target_tg_id"])
+    await state.update_data(target_role=role.value)
+    await state.set_state(AdminSetRoleState.waiting_confirm)
+    await message.answer(
+        preview_text(
+            "Подтверждение роли",
+            [
+                f"TG ID: {tg_id}",
+                f"Новая роль: {role.value}",
+            ],
+        ),
+        reply_markup=yes_no_kb("admin_set_role"),
+    )
+
+
+@router.callback_query(F.data.startswith("admin_set_role:"))
+async def set_role_confirm(call, state: FSMContext, **data):
+    admin = get_db_user(data, call.message)
+    ensure_role(admin, {Role.Admin})
+    decision = call.data.split(":")[1]
+    if decision != "yes":
+        await state.clear()
+        await call.message.answer("❌ Назначение роли отменено.")
+        await call.answer()
+        return
+    st = await state.get_data()
+    tg_id = int(st["target_tg_id"])
+    role = Role(st["target_role"])
     with session_scope() as session:
         u = session.query(User).filter(User.tg_id == tg_id).one_or_none()
         if not u:
@@ -74,7 +119,8 @@ async def set_role_role(message: Message, state: FSMContext, **data):
         u.role = role
         audit_log(session, actor_user_id=admin.id, action="set_role", entity_type="user", entity_id=str(u.id), payload={"tg_id": tg_id, "old": old.value, "new": role.value})
     await state.clear()
-    await message.answer(f"✅ Роль обновлена: tg_id={tg_id} → {role.value}")
+    await call.message.answer(f"✅ Роль обновлена: tg_id={tg_id} → {role.value}")
+    await call.answer()
 
 @router.message(F.text == "⚙️ Настройки/справочники")
 async def settings_refs(message: Message, **data):
@@ -117,7 +163,7 @@ async def recipes_list(message: Message, state: FSMContext, **data):
     ensure_role(user, {Role.Admin})
     with session_scope() as session:
         rows = session.query(ConcreteRecipe).order_by(ConcreteRecipe.mark.asc()).all()
-    lines = ["🧪 Рецептуры бетона (на 1 м3):"]
+    lines = ["Рецептуры на 1 м3:"]
     if not rows:
         lines.append("- пока нет")
     else:
@@ -127,9 +173,9 @@ async def recipes_list(message: Message, state: FSMContext, **data):
                 f"щебень {float(r.crushed_stone_t):.3f} тн; отсев {float(r.screening_t):.3f} тн; "
                 f"вода {float(r.water_l or 0):.3f} л; добавки {float(r.additives_l or 0):.3f} л"
             )
-    lines.append("\nЧтобы добавить/изменить: выберите марку бетона.")
+    lines.extend(["", "Чтобы добавить или изменить рецепт, выберите марку бетона."])
     await state.set_state(ConcreteRecipeState.waiting_mark)
-    await message.answer("\n".join(lines), reply_markup=concrete_recipe_mark_kb())
+    await message.answer(section_text("Рецептуры бетона", lines, icon="🧪", hint="Выберите марку бетона кнопкой."), reply_markup=concrete_recipe_mark_kb())
 
 @router.message(F.text == "🔗 Пригласить пользователя")
 async def invite_user_start(message: Message, state: FSMContext, **data):
@@ -137,8 +183,13 @@ async def invite_user_start(message: Message, state: FSMContext, **data):
     ensure_role(user, {Role.Admin})
     await state.set_state(InviteLinkState.waiting_role)
     await message.answer(
-        "Выберите роль для приглашения.\n"
-        "Ссылка будет одноразовой.",
+        wizard_text(
+            "Приглашение пользователя",
+            step=1,
+            total=2,
+            body_lines=["Выберите роль для нового пользователя."],
+            hint="Ссылка будет одноразовой.",
+        ),
         reply_markup=invite_role_kb(),
     )
 
@@ -182,7 +233,7 @@ async def recipe_mark(message: Message, state: FSMContext, **data):
         return
     await state.update_data(mark=mark)
     await state.set_state(ConcreteRecipeState.waiting_cement)
-    await message.answer("Цемент (кг на 1 м3):")
+    await message.answer(wizard_text("Рецептура бетона", step=1, total=8, body_lines=[f"Марка: {mark}", "Введите цемент в кг на 1 м3."]))
 
 @router.message(ConcreteRecipeState.waiting_cement)
 async def recipe_cement(message: Message, state: FSMContext, **data):
@@ -192,7 +243,7 @@ async def recipe_cement(message: Message, state: FSMContext, **data):
         return
     await state.update_data(cement_kg=qty)
     await state.set_state(ConcreteRecipeState.waiting_sand)
-    await message.answer("Песок (тн на 1 м3):")
+    await message.answer(wizard_text("Рецептура бетона", step=2, total=8, body_lines=["Введите песок в тн на 1 м3."]))
 
 @router.message(ConcreteRecipeState.waiting_sand)
 async def recipe_sand(message: Message, state: FSMContext, **data):
@@ -202,7 +253,7 @@ async def recipe_sand(message: Message, state: FSMContext, **data):
         return
     await state.update_data(sand_t=qty)
     await state.set_state(ConcreteRecipeState.waiting_crushed)
-    await message.answer("Щебень (тн на 1 м3):")
+    await message.answer(wizard_text("Рецептура бетона", step=3, total=8, body_lines=["Введите щебень в тн на 1 м3."]))
 
 @router.message(ConcreteRecipeState.waiting_crushed)
 async def recipe_crushed(message: Message, state: FSMContext, **data):
@@ -212,7 +263,7 @@ async def recipe_crushed(message: Message, state: FSMContext, **data):
         return
     await state.update_data(crushed_stone_t=qty)
     await state.set_state(ConcreteRecipeState.waiting_screening)
-    await message.answer("Отсев (тн на 1 м3):")
+    await message.answer(wizard_text("Рецептура бетона", step=4, total=8, body_lines=["Введите отсев в тн на 1 м3."]))
 
 @router.message(ConcreteRecipeState.waiting_screening)
 async def recipe_screening(message: Message, state: FSMContext, **data):
@@ -222,7 +273,7 @@ async def recipe_screening(message: Message, state: FSMContext, **data):
         return
     await state.update_data(screening_t=qty)
     await state.set_state(ConcreteRecipeState.waiting_water)
-    await message.answer("Вода (л на 1 м3):")
+    await message.answer(wizard_text("Рецептура бетона", step=5, total=8, body_lines=["Введите воду в литрах на 1 м3."]))
 
 @router.message(ConcreteRecipeState.waiting_water)
 async def recipe_water(message: Message, state: FSMContext, **data):
@@ -232,15 +283,43 @@ async def recipe_water(message: Message, state: FSMContext, **data):
         return
     await state.update_data(water_l=qty)
     await state.set_state(ConcreteRecipeState.waiting_additives)
-    await message.answer("Добавки (л на 1 м3):")
+    await message.answer(wizard_text("Рецептура бетона", step=6, total=8, body_lines=["Введите добавки в литрах на 1 м3."]))
 
 @router.message(ConcreteRecipeState.waiting_additives)
 async def recipe_additives(message: Message, state: FSMContext, **data):
-    user = get_db_user(data, message)
-    ensure_role(user, {Role.Admin})
     qty = _parse_float(message.text or "")
     if qty is None:
         await message.answer("Нужно число (л).")
+        return
+    st = await state.get_data()
+    await state.update_data(additives_l=qty)
+    await state.set_state(ConcreteRecipeState.waiting_confirm)
+    await message.answer(
+        preview_text(
+            "Проверьте рецептуру",
+            [
+                f"Марка: {st['mark']}",
+                f"Цемент: {float(st.get('cement_kg', 0)):.3f} кг",
+                f"Песок: {float(st.get('sand_t', 0)):.3f} тн",
+                f"Щебень: {float(st.get('crushed_stone_t', 0)):.3f} тн",
+                f"Отсев: {float(st.get('screening_t', 0)):.3f} тн",
+                f"Вода: {float(st.get('water_l', 0)):.3f} л",
+                f"Добавки: {qty:.3f} л",
+            ],
+        ),
+        reply_markup=yes_no_kb("recipe_save"),
+    )
+
+
+@router.callback_query(F.data.startswith("recipe_save:"))
+async def recipe_save_confirm(call, state: FSMContext, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin})
+    decision = call.data.split(":")[1]
+    if decision != "yes":
+        await state.clear()
+        await call.message.answer("❌ Сохранение рецептуры отменено.")
+        await call.answer()
         return
     st = await state.get_data()
     mark = st["mark"]
@@ -254,7 +333,7 @@ async def recipe_additives(message: Message, state: FSMContext, **data):
         r.crushed_stone_t = float(st.get("crushed_stone_t", 0))
         r.screening_t = float(st.get("screening_t", 0))
         r.water_l = float(st.get("water_l", 0))
-        r.additives_l = float(qty)
+        r.additives_l = float(st.get("additives_l", 0))
         r.is_active = True
         audit_log(
             session,
@@ -265,7 +344,8 @@ async def recipe_additives(message: Message, state: FSMContext, **data):
             payload={"mark": mark},
         )
     await state.clear()
-    await message.answer(f"✅ Рецептура сохранена: {mark}")
+    await call.message.answer(f"✅ Рецептура сохранена: {mark}")
+    await call.answer()
 
 @router.message(F.text.contains(";"))
 async def add_inventory_item(message: Message, **data):

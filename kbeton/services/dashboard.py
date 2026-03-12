@@ -151,7 +151,14 @@ def _dashboard_money_lines(session: Session, *, end: date) -> list[str]:
     return lines
 
 
-def _dashboard_realization_lines(session: Session, *, start: date, end: date, cp_map: dict[str, CounterpartyBalance]) -> list[str]:
+def _dashboard_realization_lines(
+    session: Session,
+    *,
+    start: date,
+    end: date,
+    cp_map: dict[str, CounterpartyBalance],
+    limit: int = 5,
+) -> list[str]:
     rows = (
         session.query(
             ProductionShift.counterparty_name,
@@ -165,7 +172,7 @@ def _dashboard_realization_lines(session: Session, *, start: date, end: date, cp
         .join(ProductionShift, ProductionShift.id == ProductionOutput.shift_id)
         .filter(ProductionShift.date >= start, ProductionShift.date <= end)
         .order_by(ProductionRealization.id.desc())
-        .limit(5)
+        .limit(limit)
         .all()
     )
     lines = ["РЕАЛИЗАЦИЯ"]
@@ -196,18 +203,18 @@ def _dashboard_realization_lines(session: Session, *, start: date, end: date, cp
     return lines
 
 
-def _dashboard_counterparty_lines(title: str, rows: list[tuple[str, float]]) -> list[str]:
+def _dashboard_counterparty_lines(title: str, rows: list[tuple[str, float]], *, limit: int = 5) -> list[str]:
     lines = [title]
     if not rows:
         lines.append("- нет данных")
         return lines
-    max_amount = max((amount for _name, amount in rows[:5]), default=0)
-    for name, amount in rows[:5]:
+    max_amount = max((amount for _name, amount in rows[:limit]), default=0)
+    for name, amount in rows[:limit]:
         lines.append(f"{_clip(name, 18):<18} {_bar(amount, max_amount, 8)} {_fmt_money(amount)}")
     return lines
 
 
-def _dashboard_production_lines(session: Session, *, start: date, end: date) -> list[str]:
+def _dashboard_production_lines(session: Session, *, start: date, end: date, limit: int | None = None) -> list[str]:
     rows = (
         session.query(ProductionOutput.product_type, ProductionOutput.mark, ProductionOutput.quantity, ProductionOutput.uom)
         .join(ProductionShift, ProductionShift.id == ProductionOutput.shift_id)
@@ -243,6 +250,7 @@ def _dashboard_production_lines(session: Session, *, start: date, end: date) -> 
 
     seen: set[tuple[str, str, str]] = set()
     max_qty = max(totals.values(), default=0)
+    shown = 0
     for ptype, mark, uom in ordered:
         key = (ptype, mark, uom)
         if key in seen:
@@ -253,10 +261,13 @@ def _dashboard_production_lines(session: Session, *, start: date, end: date) -> 
         if ptype == ProductType.concrete.value and mark:
             label = mark
         lines.append(f"{_clip(label, 18):<18} {_bar(qty, max_qty, 8)} {_fmt_qty(qty, uom)}")
+        shown += 1
+        if limit is not None and shown >= limit:
+            break
     return lines
 
 
-def _dashboard_inventory_lines(session: Session) -> list[str]:
+def _dashboard_inventory_lines(session: Session, *, compact: bool = False) -> list[str]:
     rows = (
         session.query(InventoryItem.name, InventoryItem.uom, InventoryBalance.qty)
         .join(InventoryBalance, InventoryBalance.item_id == InventoryItem.id)
@@ -286,7 +297,8 @@ def _dashboard_inventory_lines(session: Session) -> list[str]:
                 break
 
     max_qty = max((float(value[1] or 0) for value in selected.values()), default=0)
-    for label, _tokens in labels:
+    selected_labels = labels[:3] if compact else labels
+    for label, _tokens in selected_labels:
         item = selected.get(label)
         if item:
             _raw_name, qty, uom = item
@@ -296,7 +308,8 @@ def _dashboard_inventory_lines(session: Session) -> list[str]:
     return lines
 
 
-def build_dashboard_text(session: Session, *, start: date, end: date) -> str:
+def build_dashboard_text(session: Session, *, start: date, end: date, mode: str = "full") -> str:
+    compact = mode == "summary"
     snap, cp_map = _latest_counterparty_snapshot_map(session)
     cp_rows = list(cp_map.values())
     debtors = sorted(
@@ -314,25 +327,27 @@ def build_dashboard_text(session: Session, *, start: date, end: date) -> str:
     money_lines = _dashboard_money_lines(session, end=end)
     if snap:
         money_lines.append(f"Снимок   · {snap.snapshot_date.strftime('%d.%m.%Y')}")
+    if compact and len(money_lines) > 3:
+        money_lines = money_lines[:3]
     lines.extend([""] + _dashboard_section("ДЕНЬГИ", "💰", money_lines))
 
-    realization_lines = _dashboard_realization_lines(session, start=start, end=end, cp_map=cp_map)
+    realization_lines = _dashboard_realization_lines(session, start=start, end=end, cp_map=cp_map, limit=3 if compact else 5)
     realization_body = ["нет данных"] if len(realization_lines) == 2 and realization_lines[1] == "- нет данных" else realization_lines[1:]
     lines.extend([""] + _dashboard_section(realization_lines[0], "🚚", realization_body))
 
-    debt_lines = _dashboard_counterparty_lines("Д/З ЗАДОЛЖЕННОСТЬ", debtors)
+    debt_lines = _dashboard_counterparty_lines("Д/З ЗАДОЛЖЕННОСТЬ", debtors, limit=3 if compact else 5)
     debt_body = ["нет данных"] if len(debt_lines) == 2 and debt_lines[1] == "- нет данных" else debt_lines[1:]
     lines.extend([""] + _dashboard_section(debt_lines[0], "📥", debt_body))
 
-    credit_lines = _dashboard_counterparty_lines("К/З ЗАДОЛЖЕННОСТЬ", creditors)
+    credit_lines = _dashboard_counterparty_lines("К/З ЗАДОЛЖЕННОСТЬ", creditors, limit=3 if compact else 5)
     credit_body = ["нет данных"] if len(credit_lines) == 2 and credit_lines[1] == "- нет данных" else credit_lines[1:]
     lines.extend([""] + _dashboard_section(credit_lines[0], "📤", credit_body))
 
-    prod_lines = _dashboard_production_lines(session, start=start, end=end)
+    prod_lines = _dashboard_production_lines(session, start=start, end=end, limit=3 if compact else None)
     prod_body = ["нет данных"] if len(prod_lines) == 2 and prod_lines[1] == "- нет данных" else prod_lines[1:]
     lines.extend([""] + _dashboard_section(prod_lines[0].rstrip(":"), "🏭", prod_body))
 
-    stock_lines = _dashboard_inventory_lines(session)
+    stock_lines = _dashboard_inventory_lines(session, compact=compact)
     stock_body = ["нет данных"] if len(stock_lines) == 2 and stock_lines[1] == "- нет данных" else stock_lines[1:]
     lines.extend([""] + _dashboard_section(stock_lines[0].rstrip(":"), "📦", stock_body))
 

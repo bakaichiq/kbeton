@@ -13,6 +13,7 @@ from kbeton.services.audit import audit_log
 from kbeton.services.s3 import put_bytes
 
 from apps.bot.states import InventoryTxnState, InventoryAdjustState
+from apps.bot.ui import section_text, wizard_text
 from apps.bot.utils import get_db_user, ensure_role
 
 router = Router()
@@ -43,7 +44,7 @@ async def issue_start(message: Message, state: FSMContext, **data):
         return
     await state.set_state(InventoryTxnState.waiting_item)
     await state.update_data(inv_action="issue")
-    await message.answer("Выберите расходник:", reply_markup=_items_kb(items, action="issue"))
+    await message.answer(wizard_text("Выдача расходника", step=1, total=4, body_lines=["Выберите расходник."]), reply_markup=_items_kb(items, action="issue"))
 
 @router.message(F.text == "📥 Приход")
 async def receipt_start(message: Message, state: FSMContext, **data):
@@ -56,7 +57,7 @@ async def receipt_start(message: Message, state: FSMContext, **data):
         return
     await state.set_state(InventoryTxnState.waiting_item)
     await state.update_data(inv_action="receipt")
-    await message.answer("Выберите расходник для прихода:", reply_markup=_items_kb(items, action="receipt"))
+    await message.answer(wizard_text("Приход расходника", step=1, total=5, body_lines=["Выберите расходник для прихода."]), reply_markup=_items_kb(items, action="receipt"))
 
 @router.message(F.text == "🗑️ Списать")
 async def writeoff_start(message: Message, state: FSMContext, **data):
@@ -69,7 +70,7 @@ async def writeoff_start(message: Message, state: FSMContext, **data):
         return
     await state.set_state(InventoryTxnState.waiting_item)
     await state.update_data(inv_action="writeoff")
-    await message.answer("Выберите расходник:", reply_markup=_items_kb(items, action="writeoff"))
+    await message.answer(wizard_text("Списание расходника", step=1, total=4, body_lines=["Выберите расходник."]), reply_markup=_items_kb(items, action="writeoff"))
 
 @router.callback_query(F.data.startswith("inv_item:"))
 async def item_selected(call: CallbackQuery, state: FSMContext, **data):
@@ -79,7 +80,9 @@ async def item_selected(call: CallbackQuery, state: FSMContext, **data):
     item_id = int(item_id)
     await state.update_data(item_id=item_id, inv_action=action)
     await state.set_state(InventoryTxnState.waiting_qty)
-    await call.message.answer("Введите количество (число):")
+    title = {"issue": "Выдача расходника", "receipt": "Приход расходника", "writeoff": "Списание расходника", "inv": "Инвентаризация"}.get(action, "Складская операция")
+    total = 5 if action == "receipt" else (3 if action == "inv" else 4)
+    await call.message.answer(wizard_text(title, step=2, total=total, body_lines=["Введите количество."]))
     await call.answer()
 
 @router.message(InventoryTxnState.waiting_qty)
@@ -96,10 +99,11 @@ async def qty_entered(message: Message, state: FSMContext, **data):
     action = st.get("inv_action")
     if action == "receipt":
         await state.set_state(InventoryTxnState.waiting_unit_price)
-        await message.answer("Введите стоимость за единицу (число, KGS):")
+        await message.answer(wizard_text("Приход расходника", step=3, total=5, body_lines=["Введите стоимость за единицу в KGS."]))
         return
     await state.set_state(InventoryTxnState.waiting_receiver)
-    await message.answer("Кому выдали / инициатор (текст, можно '-'):")
+    title = "Выдача расходника" if action == "issue" else "Списание расходника"
+    await message.answer(wizard_text(title, step=3, total=4, body_lines=["Укажите получателя или инициатора."], hint="Можно отправить '-' если не нужно."))
 
 @router.message(InventoryTxnState.waiting_unit_price)
 async def unit_price_entered(message: Message, state: FSMContext, **data):
@@ -116,7 +120,7 @@ async def unit_price_entered(message: Message, state: FSMContext, **data):
     total_cost = round(qty * unit_price, 2)
     await state.update_data(total_cost=total_cost)
     await state.set_state(InventoryTxnState.waiting_fact_weight)
-    await message.answer(f"Итого автоматически: {total_cost:.2f} KGS\nВведите факт вес по весам (число, кг/тн по вашей учетной единице):")
+    await message.answer(wizard_text("Приход расходника", step=4, total=5, body_lines=[f"Сумма автоматически: {total_cost:.2f} KGS", "Введите факт вес по весам."]))
 
 @router.message(InventoryTxnState.waiting_fact_weight)
 async def fact_weight_entered(message: Message, state: FSMContext, **data):
@@ -129,19 +133,19 @@ async def fact_weight_entered(message: Message, state: FSMContext, **data):
         return
     await state.update_data(fact_weight=fact_weight)
     await state.set_state(InventoryTxnState.waiting_comment)
-    await message.answer("Комментарий к приходу (можно '-'):")
+    await message.answer(wizard_text("Приход расходника", step=5, total=5, body_lines=["Введите комментарий к приходу."], hint="Можно отправить '-' если комментария нет."))
 
 @router.message(InventoryTxnState.waiting_receiver)
 async def receiver_entered(message: Message, state: FSMContext, **data):
     await state.update_data(receiver=(message.text or "").strip())
     await state.set_state(InventoryTxnState.waiting_department)
-    await message.answer("Подразделение (текст, можно '-'):")    
+    await message.answer(wizard_text("Складская операция", step=4, total=4, body_lines=["Укажите подразделение."], hint="Можно отправить '-' если не нужно."))
 
 @router.message(InventoryTxnState.waiting_department)
 async def department_entered(message: Message, state: FSMContext, **data):
     await state.update_data(department=(message.text or "").strip())
     await state.set_state(InventoryTxnState.waiting_comment)
-    await message.answer("Комментарий (можно '-'):")    
+    await message.answer(wizard_text("Складская операция", step=4, total=4, body_lines=["Введите комментарий."], hint="Можно отправить '-' если комментария нет."))
 
 @router.message(InventoryTxnState.waiting_comment)
 async def txn_finish(message: Message, state: FSMContext, **data):
@@ -166,7 +170,7 @@ async def txn_finish(message: Message, state: FSMContext, **data):
     if action == "receipt":
         await state.update_data(comment=comment)
         await state.set_state(InventoryTxnState.waiting_invoice_photo)
-        await message.answer("Отправьте фото накладного (как фото).")
+        await message.answer(section_text("Приход расходника", ["Отправьте фото накладного как фото."], icon="📥", hint="После загрузки приход будет сохранен."))
         return
 
     txn_type = InventoryTxnType.issue if action == "issue" else InventoryTxnType.writeoff
@@ -197,7 +201,7 @@ async def txn_finish(message: Message, state: FSMContext, **data):
         name = it.name
 
     await state.clear()
-    await message.answer(f"✅ Готово. {name}: остаток {bal_qty:.3f} {uom}")
+    await message.answer(section_text("Складская операция выполнена", [f"{name}: остаток {bal_qty:.3f} {uom}"], icon="✅"))
 
 @router.message(InventoryTxnState.waiting_invoice_photo, F.photo)
 async def receipt_invoice_photo(message: Message, state: FSMContext, **data):
@@ -265,12 +269,18 @@ async def receipt_invoice_photo(message: Message, state: FSMContext, **data):
         else ""
     )
     await message.answer(
-        f"✅ Приход сохранен. {name}: остаток {bal_qty:.3f} {uom}\n"
-        f"Цена: {(unit_price or 0):.3f} KGS/{uom}\n"
-        f"Сумма: {(total_cost or 0):.2f} KGS\n"
-        f"Факт вес: {fact_weight or 0:.3f}\n"
-        f"Накладная сохранена."
-        f"{approval_note}"
+        section_text(
+            "Приход сохранен",
+            [
+                f"{name}: остаток {bal_qty:.3f} {uom}",
+                f"Цена: {(unit_price or 0):.3f} KGS/{uom}",
+                f"Сумма: {(total_cost or 0):.2f} KGS",
+                f"Факт вес: {fact_weight or 0:.3f}",
+                "Накладная сохранена.",
+                approval_note.strip() if approval_note else "",
+            ],
+            icon="✅",
+        )
     )
 
 @router.message(InventoryTxnState.waiting_invoice_photo)
@@ -305,7 +315,7 @@ async def inv_start(message: Message, state: FSMContext, **data):
         await message.answer("Нет номенклатуры. Добавьте в '⚙️ Настройки/справочники'.")
         return
     await state.set_state(InventoryAdjustState.waiting_item)
-    await message.answer("Выберите расходник для инвентаризации:", reply_markup=_items_kb(items, action="inv"))
+    await message.answer(wizard_text("Инвентаризация", step=1, total=3, body_lines=["Выберите расходник для инвентаризации."]), reply_markup=_items_kb(items, action="inv"))
 
 @router.callback_query(F.data.startswith("inv_item:inv:"))
 async def inv_item(call: CallbackQuery, state: FSMContext, **data):
@@ -314,7 +324,7 @@ async def inv_item(call: CallbackQuery, state: FSMContext, **data):
     item_id = int(call.data.split(":")[2])
     await state.update_data(item_id=item_id)
     await state.set_state(InventoryAdjustState.waiting_fact_qty)
-    await call.message.answer("Введите фактический остаток (число):")
+    await call.message.answer(wizard_text("Инвентаризация", step=2, total=3, body_lines=["Введите фактический остаток."]))
     await call.answer()
 
 @router.message(InventoryAdjustState.waiting_fact_qty)
@@ -326,7 +336,7 @@ async def inv_fact(message: Message, state: FSMContext, **data):
         return
     await state.update_data(fact_qty=qty)
     await state.set_state(InventoryAdjustState.waiting_comment)
-    await message.answer("Комментарий (можно '-'):")    
+    await message.answer(wizard_text("Инвентаризация", step=3, total=3, body_lines=["Введите комментарий."], hint="Можно отправить '-' если комментария нет."))
 
 @router.message(InventoryAdjustState.waiting_comment)
 async def inv_finish(message: Message, state: FSMContext, **data):
@@ -358,4 +368,4 @@ async def inv_finish(message: Message, state: FSMContext, **data):
         audit_log(session, actor_user_id=user.id, action="inventory_adjust", entity_type="inventory_item", entity_id=str(item_id), payload={"old": old, "new": fact_qty, "delta": delta})
         bal2 = session.query(InventoryBalance).filter(InventoryBalance.item_id == item_id).one()
     await state.clear()
-    await message.answer(f"✅ Инвентаризация: {it.name} было {old:.3f} → стало {float(bal2.qty):.3f} {it.uom}")
+    await message.answer(section_text("Инвентаризация завершена", [f"{it.name}: было {old:.3f} → стало {float(bal2.qty):.3f} {it.uom}"], icon="✅"))

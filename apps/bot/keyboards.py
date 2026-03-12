@@ -6,6 +6,7 @@ from kbeton.models.enums import Role
 
 CONCRETE_RECIPE_MARKS = ["M100", "M150", "M200", "M250", "M300", "M350", "M400"]
 INVITE_ROLE_OPTIONS = ["Viewer", "FinDir", "HeadProd", "Operator", "Warehouse"]
+ADMIN_ROLE_OPTIONS = ["Admin", "FinDir", "HeadProd", "Operator", "Warehouse", "Viewer"]
 
 def _role_allowed(role: Role | None, allowed: set[Role]) -> bool:
     if role is None:
@@ -20,6 +21,11 @@ def _adjust_rows(kb: ReplyKeyboardBuilder, header_sizes: list[int], action_count
         rows.append(2 if action_count >= 2 else 1)
         action_count -= 2
     kb.adjust(*rows)
+
+
+def _add_nav_buttons(kb: ReplyKeyboardBuilder) -> None:
+    for text in ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]:
+        kb.add(KeyboardButton(text=text))
 
 def main_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
@@ -44,9 +50,7 @@ def main_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
 
 def finance_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     action_buttons: list[str] = []
     if _role_allowed(role, {Role.Admin, Role.FinDir}):
         action_buttons.append("📥 Загрузить взаиморасчеты (контрагенты)")
@@ -72,9 +76,7 @@ def finance_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
 
 def production_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     action_buttons: list[str] = []
     if _role_allowed(role, {Role.Admin, Role.Operator}):
         action_buttons.append("✅ Закрыть смену")
@@ -90,9 +92,7 @@ def production_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
 
 def shift_type_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     for text in ["day", "night"]:
         kb.add(KeyboardButton(text=text))
     _adjust_rows(kb, [2, 1], 2)
@@ -100,9 +100,7 @@ def shift_type_kb() -> ReplyKeyboardMarkup:
 
 def line_type_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     for text in ["ДУ", "РБУ"]:
         kb.add(KeyboardButton(text=text))
     _adjust_rows(kb, [2, 1], 2)
@@ -110,9 +108,7 @@ def line_type_kb() -> ReplyKeyboardMarkup:
 
 def concrete_mark_kb(marks: list[str]) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     for text in marks:
         kb.add(KeyboardButton(text=text))
     kb.add(KeyboardButton(text="0"))
@@ -121,9 +117,7 @@ def concrete_mark_kb(marks: list[str]) -> ReplyKeyboardMarkup:
 
 def concrete_recipe_mark_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     for text in CONCRETE_RECIPE_MARKS:
         kb.add(KeyboardButton(text=text))
     _adjust_rows(kb, [2, 1], len(CONCRETE_RECIPE_MARKS))
@@ -131,9 +125,7 @@ def concrete_recipe_mark_kb() -> ReplyKeyboardMarkup:
 
 def invite_role_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     for text in INVITE_ROLE_OPTIONS:
         kb.add(KeyboardButton(text=text))
     _adjust_rows(kb, [2, 1], len(INVITE_ROLE_OPTIONS))
@@ -141,9 +133,7 @@ def invite_role_kb() -> ReplyKeyboardMarkup:
 
 def concrete_more_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     kb.add(KeyboardButton(text="✅ Еще марка"))
     kb.add(KeyboardButton(text="🏁 Готово"))
     _adjust_rows(kb, [2, 1], 2)
@@ -151,9 +141,7 @@ def concrete_more_kb() -> ReplyKeyboardMarkup:
 
 def counterparty_registry_kb(counterparties: list[str]) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     for name in counterparties[:40]:
         kb.add(KeyboardButton(text=name))
     _adjust_rows(kb, [2, 1], min(len(counterparties), 40))
@@ -161,9 +149,7 @@ def counterparty_registry_kb(counterparties: list[str]) -> ReplyKeyboardMarkup:
 
 def warehouse_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     action_buttons: list[str] = []
     if _role_allowed(role, {Role.Admin, Role.Warehouse}):
         action_buttons.append("📥 Приход")
@@ -179,9 +165,7 @@ def warehouse_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
 
 def admin_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     action_buttons: list[str] = []
     if _role_allowed(role, {Role.Admin}):
         action_buttons.append("👤 Пользователи и роли")
@@ -201,7 +185,7 @@ def pnl_period_kb() -> InlineKeyboardMarkup:
     b.adjust(5)
     return b.as_markup()
 
-def dashboard_period_kb(active_period: str = "month") -> InlineKeyboardMarkup:
+def dashboard_period_kb(active_period: str = "month", active_mode: str = "full") -> InlineKeyboardMarkup:
     labels = [
         ("day", "Сегодня"),
         ("week", "Неделя"),
@@ -211,8 +195,12 @@ def dashboard_period_kb(active_period: str = "month") -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for period, label in labels:
         prefix = "● " if period == active_period else ""
-        b.button(text=f"{prefix}{label}", callback_data=f"dashboard:{period}")
-    b.adjust(2, 2)
+        b.button(text=f"{prefix}{label}", callback_data=f"dashboard:period:{period}:{active_mode}")
+    mode_labels = [("summary", "Кратко"), ("full", "Подробно")]
+    for mode, label in mode_labels:
+        prefix = "● " if mode == active_mode else ""
+        b.button(text=f"{prefix}{label}", callback_data=f"dashboard:mode:{mode}:{active_period}")
+    b.adjust(2, 2, 2)
     return b.as_markup()
 
 def production_period_kb() -> InlineKeyboardMarkup:
@@ -224,9 +212,7 @@ def production_period_kb() -> InlineKeyboardMarkup:
 
 def shift_report_period_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     for text in ["день", "неделя", "месяц"]:
         kb.add(KeyboardButton(text=text))
     _adjust_rows(kb, [2, 1], 3)
@@ -234,9 +220,7 @@ def shift_report_period_kb() -> ReplyKeyboardMarkup:
 
 def shift_report_line_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     for text in ["ДУ", "РБУ", "Все"]:
         kb.add(KeyboardButton(text=text))
     _adjust_rows(kb, [2, 1], 3)
@@ -244,9 +228,7 @@ def shift_report_line_kb() -> ReplyKeyboardMarkup:
 
 def shift_report_operator_kb(operators: list[str]) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     kb.add(KeyboardButton(text="Все"))
     for text in operators:
         kb.add(KeyboardButton(text=text))
@@ -255,9 +237,7 @@ def shift_report_operator_kb(operators: list[str]) -> ReplyKeyboardMarkup:
 
 def material_price_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     for text in ["цемент", "песок", "щебень", "отсев", "вода", "добавки"]:
         kb.add(KeyboardButton(text=text))
     _adjust_rows(kb, [2, 1], 6)
@@ -265,9 +245,7 @@ def material_price_kb() -> ReplyKeyboardMarkup:
 
 def overhead_cost_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     for text in ["энергия", "амортизация"]:
         kb.add(KeyboardButton(text=text))
     _adjust_rows(kb, [2, 1], 2)
@@ -275,9 +253,7 @@ def overhead_cost_kb() -> ReplyKeyboardMarkup:
 
 def concrete_cost_mark_kb(marks: list[str]) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
-    for text in base_buttons:
-        kb.add(KeyboardButton(text=text))
+    _add_nav_buttons(kb)
     kb.add(KeyboardButton(text="Все"))
     for text in marks:
         kb.add(KeyboardButton(text=text))
@@ -297,3 +273,12 @@ def yes_no_kb(prefix: str) -> InlineKeyboardMarkup:
     b.button(text="❌ Нет", callback_data=f"{prefix}:no")
     b.adjust(2)
     return b.as_markup()
+
+
+def admin_role_kb() -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardBuilder()
+    _add_nav_buttons(kb)
+    for text in ADMIN_ROLE_OPTIONS:
+        kb.add(KeyboardButton(text=text))
+    _adjust_rows(kb, [2, 1], len(ADMIN_ROLE_OPTIONS))
+    return kb.as_markup(resize_keyboard=True)

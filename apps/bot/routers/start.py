@@ -15,6 +15,19 @@ from kbeton.services.invites import consume_user_invite
 
 router = Router()
 
+
+def _state_menu(state_name: str | None, role: Role) -> tuple[str, object]:
+    name = state_name or ""
+    if any(token in name for token in ["Counterparty", "RealizationState", "ArticleAddState", "PriceSetState", "MappingRuleAddState", "MaterialPriceState", "OverheadCostState"]):
+        return "Финансы:", finance_menu(role)
+    if any(token in name for token in ["ShiftCloseState", "ShiftApprovalState", "ShiftReportState"]):
+        return "Производство:", production_menu(role)
+    if any(token in name for token in ["InventoryTxnState", "InventoryAdjustState"]):
+        return "Склад:", warehouse_menu(role)
+    if any(token in name for token in ["AdminSetRoleState", "ConcreteRecipeState", "InviteLinkState"]):
+        return "Админ:", admin_menu(role)
+    return "Главное меню:", main_menu(role)
+
 def _extract_start_arg(text: str | None) -> str:
     parts = (text or "").strip().split(maxsplit=1)
     if len(parts) < 2:
@@ -91,9 +104,12 @@ async def cancel_text(message: Message, state: FSMContext, **data):
     await message.answer("Главное меню:", reply_markup=main_menu(user.role))
 
 @router.message(F.text == "⬅️ Назад")
-async def back(message: Message, **data):
+async def back(message: Message, state: FSMContext, **data):
     user = get_db_user(data, message)
-    await message.answer("Главное меню:", reply_markup=main_menu(user.role))
+    state_name = await state.get_state()
+    await state.clear()
+    title, markup = _state_menu(state_name, user.role)
+    await message.answer(title, reply_markup=markup)
 
 @router.message(F.text == "💰 Финансы")
 async def go_finance(message: Message, **data):

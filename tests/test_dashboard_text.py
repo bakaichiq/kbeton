@@ -211,3 +211,20 @@ def test_build_dashboard_text_uses_visual_sections():
         assert "Топливо" in dashboard_text
     finally:
         session.close()
+
+
+def test_build_dashboard_text_supports_summary_mode():
+    session = _session()
+    try:
+        summary_text = _build_dashboard_text(
+            session,
+            start=date(date.today().year, date.today().month, 1),
+            end=date.today(),
+            mode="summary",
+        )
+
+        assert "Д А Ш Б О Р Д" in summary_text
+        assert "┏━━ 💰 ДЕНЬГИ" in summary_text
+        assert "┏━━ 📦 Склад" in summary_text
+    finally:
+        session.close()

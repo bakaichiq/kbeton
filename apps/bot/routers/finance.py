@@ -233,7 +233,23 @@ def _active_dashboard_period(message: Message | None) -> str | None:
             text = (getattr(button, "text", "") or "").strip()
             callback_data = (getattr(button, "callback_data", "") or "").strip()
             if text.startswith("● ") and callback_data.startswith("dashboard:"):
-                return callback_data.split(":", 1)[1]
+                parts = callback_data.split(":")
+                if len(parts) >= 4 and parts[1] == "period":
+                    return parts[2]
+                if len(parts) >= 4 and parts[1] == "mode":
+                    return parts[3]
+    return None
+
+
+def _active_dashboard_mode(message: Message | None) -> str | None:
+    markup = getattr(message, "reply_markup", None)
+    rows = getattr(markup, "inline_keyboard", None) or []
+    for row in rows:
+        for button in row:
+            text = (getattr(button, "text", "") or "").strip()
+            callback_data = (getattr(button, "callback_data", "") or "").strip()
+            if text.startswith("● ") and callback_data.startswith("dashboard:mode:"):
+                return callback_data.split(":")[2]
     return None
 
 def _realization_candidates(session):
@@ -1313,51 +1329,70 @@ async def dashboard_quick(message: Message, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.FinDir, Role.Viewer})
     period = "month"
+    mode = "full"
     start, end = _range_for(period)
     with session_scope() as session:
-        text = _build_dashboard_text(session, start=start, end=end)
+        text = _build_dashboard_text(session, start=start, end=end, mode=mode)
         audit_log(
             session,
             actor_user_id=user.id,
             action="dashboard_view",
             entity_type="pnl",
             entity_id=_dashboard_period_label(period),
-            payload={"period": period},
+            payload={"period": period, "mode": mode},
         )
     await message.answer(
         f"<pre>{html.escape(text)}</pre>",
         parse_mode="HTML",
-        reply_markup=dashboard_period_kb(period),
+        reply_markup=dashboard_period_kb(period, mode),
     )
 
 @router.callback_query(F.data.startswith("dashboard:"))
 async def dashboard_period_pick(call: CallbackQuery, **data):
     user = get_db_user(data, call.message)
     ensure_role(user, {Role.Admin, Role.FinDir, Role.Viewer})
-    period = (call.data or "").split(":", 1)[1]
+    parts = (call.data or "").split(":")
+    if len(parts) != 4:
+        await call.answer("Неизвестное действие.", show_alert=False)
+        return
+    _prefix, action, value, companion = parts
+    current_period = _active_dashboard_period(call.message) or "month"
+    current_mode = _active_dashboard_mode(call.message) or "full"
+    if action == "period":
+        period = value
+        mode = companion
+    elif action == "mode":
+        mode = value
+        period = companion
+    else:
+        await call.answer("Неизвестное действие.", show_alert=False)
+        return
     if period not in {"day", "week", "month", "year"}:
         await call.answer("Неизвестный период.", show_alert=False)
         return
-    if _active_dashboard_period(call.message) == period:
+    if mode not in {"summary", "full"}:
+        await call.answer("Неизвестный режим.", show_alert=False)
+        return
+    if current_period == period and current_mode == mode:
         await call.answer()
         return
     start, end = _range_for(period)
     with session_scope() as session:
-        text = _build_dashboard_text(session, start=start, end=end)
+        text = _build_dashboard_text(session, start=start, end=end, mode=mode)
         audit_log(
             session,
             actor_user_id=user.id,
             action="dashboard_view",
             entity_type="pnl",
             entity_id=_dashboard_period_label(period),
-            payload={"period": period},
+            payload={"period": period, "mode": mode},
         )
     if call.message:
         try:
             await call.message.edit_text(
                 f"<pre>{html.escape(text)}</pre>",
                 parse_mode="HTML",
-                reply_markup=dashboard_period_kb(period),
+                reply_markup=dashboard_period_kb(period, mode),
             )
         except TelegramBadRequest as exc:
             if "message is not modified" not in str(exc):
