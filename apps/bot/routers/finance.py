@@ -5,6 +5,7 @@ import uuid
 from datetime import date, datetime, timedelta
 
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
@@ -548,6 +549,17 @@ def _dashboard_period_label(period: str) -> str:
         "month": "month",
         "year": "year",
     }.get(period, period)
+
+def _active_dashboard_period(message: Message | None) -> str | None:
+    markup = getattr(message, "reply_markup", None)
+    rows = getattr(markup, "inline_keyboard", None) or []
+    for row in rows:
+        for button in row:
+            text = (getattr(button, "text", "") or "").strip()
+            callback_data = (getattr(button, "callback_data", "") or "").strip()
+            if text.startswith("● ") and callback_data.startswith("dashboard:"):
+                return callback_data.split(":", 1)[1]
+    return None
 
 def _realization_candidates(session):
     outputs = (
@@ -1651,6 +1663,9 @@ async def dashboard_period_pick(call: CallbackQuery, **data):
     if period not in {"day", "week", "month", "year"}:
         await call.answer("Неизвестный период.", show_alert=False)
         return
+    if _active_dashboard_period(call.message) == period:
+        await call.answer()
+        return
     start, end = _range_for(period)
     with session_scope() as session:
         text = _build_dashboard_text(session, start=start, end=end)
@@ -1663,11 +1678,15 @@ async def dashboard_period_pick(call: CallbackQuery, **data):
             payload={"period": period},
         )
     if call.message:
-        await call.message.edit_text(
-            f"<pre>{html.escape(text)}</pre>",
-            parse_mode="HTML",
-            reply_markup=dashboard_period_kb(period),
-        )
+        try:
+            await call.message.edit_text(
+                f"<pre>{html.escape(text)}</pre>",
+                parse_mode="HTML",
+                reply_markup=dashboard_period_kb(period),
+            )
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc):
+                raise
     await call.answer()
 
 @router.message(F.text == "Контрагенты/Задолженность (снимки)")

@@ -1,4 +1,7 @@
+from types import SimpleNamespace
+
 from apps.bot.keyboards import dashboard_period_kb
+from apps.bot.routers.finance import _active_dashboard_period
 
 
 def test_dashboard_period_keyboard_has_expected_buttons_and_active_state():
@@ -15,3 +18,8 @@ def test_dashboard_period_keyboard_has_expected_buttons_and_active_state():
     assert "dashboard:week" in callbacks
     assert "dashboard:month" in callbacks
     assert "dashboard:year" in callbacks
+
+
+def test_active_dashboard_period_detects_selected_button():
+    message = SimpleNamespace(reply_markup=dashboard_period_kb("year"))
+    assert _active_dashboard_period(message) == "year"
