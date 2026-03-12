@@ -33,7 +33,7 @@ def _session():
     return Session()
 
 
-def test_build_dashboard_text_uses_compact_sections():
+def test_build_dashboard_text_uses_visual_sections():
     session = _session()
     try:
         session.execute(text("INSERT INTO import_jobs (id) VALUES (1)"))
@@ -135,21 +135,23 @@ def test_build_dashboard_text_uses_compact_sections():
 
         dashboard_text = _build_dashboard_text(session, start=date(date.today().year, date.today().month, 1), end=date.today())
 
-        assert "ДАШБОРД" in dashboard_text
+        assert "Д А Ш Б О Р Д" in dashboard_text
+        assert "╔" in dashboard_text
+        assert "┏━━ 💰 ДЕНЬГИ" in dashboard_text
         assert date.today().strftime("%d.%m.%Y") in dashboard_text
         assert "Р/с" in dashboard_text
         assert "Касса" in dashboard_text
         assert "нет данных" in dashboard_text
-        assert "РЕАЛИЗАЦИЯ" in dashboard_text
+        assert "┏━━ 🚚 РЕАЛИЗАЦИЯ" in dashboard_text
         assert "Аламуд" in dashboard_text
         assert "570 000 сом" in dashboard_text
         assert "долг 1 500 000 сом" in dashboard_text
-        assert "Д/З ЗАДОЛЖЕННОСТЬ" in dashboard_text
-        assert "К/З ЗАДОЛЖЕННОСТЬ" in dashboard_text
+        assert "┏━━ 📥 Д/З ЗАДОЛЖЕННОСТЬ" in dashboard_text
+        assert "┏━━ 📤 К/З ЗАДОЛЖЕННОСТЬ" in dashboard_text
         assert "Производство" in dashboard_text
         assert "M350" in dashboard_text
         assert "Щебень" in dashboard_text
-        assert "Склад" in dashboard_text
+        assert "┏━━ 📦 Склад" in dashboard_text
         assert "Топливо" in dashboard_text
     finally:
         session.close()
