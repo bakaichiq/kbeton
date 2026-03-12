@@ -275,6 +275,19 @@ def yes_no_kb(prefix: str) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+def preview_actions_kb(prefix: str, edit_buttons: list[tuple[str, str]], *, confirm_label: str = "✅ Подтвердить") -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text=confirm_label, callback_data=f"{prefix}:yes")
+    for text, action in edit_buttons:
+        b.button(text=text, callback_data=f"{prefix}:{action}")
+    b.button(text="❌ Отмена", callback_data=f"{prefix}:no")
+    if edit_buttons:
+        b.adjust(1, *([2] * ((len(edit_buttons) + 1) // 2)), 1)
+    else:
+        b.adjust(1, 1)
+    return b.as_markup()
+
+
 def admin_role_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
     _add_nav_buttons(kb)

@@ -33,6 +33,7 @@ from apps.bot.keyboards import (
     concrete_mark_kb,
     concrete_more_kb,
     pager_kb,
+    preview_actions_kb,
     yes_no_kb,
     production_period_kb,
     shift_report_period_kb,
@@ -94,6 +95,28 @@ def _pending_shifts_payload(page: int) -> tuple[str, object]:
             markup.inline_keyboard.extend(pager.inline_keyboard)
         return text, markup
     return text, None
+
+
+def _shift_preview_kb(state_data: dict):
+    line_type = state_data.get("line_type")
+    edit_buttons: list[tuple[str, str]] = []
+    if line_type == "du":
+        edit_buttons.extend(
+            [
+                ("✏️ Щебень", "edit_crushed"),
+                ("✏️ Отсев", "edit_screening"),
+                ("✏️ Песок", "edit_sand"),
+            ]
+        )
+    else:
+        edit_buttons.extend(
+            [
+                ("✏️ Контрагент", "edit_counterparty"),
+                ("✏️ Бетон", "edit_concrete"),
+            ]
+        )
+    edit_buttons.append(("✏️ Комментарий", "edit_comment"))
+    return preview_actions_kb("shift_confirm", edit_buttons, confirm_label="✅ Отправить")
 
 @router.message(F.text == "✅ Закрыть смену")
 async def close_shift_start(message: Message, state: FSMContext, **data):
@@ -268,13 +291,52 @@ async def close_shift_finish(message: Message, state: FSMContext, **data):
     st = await state.get_data()
     lines = _build_shift_summary(st)
     await state.set_state(ShiftCloseState.waiting_confirm)
-    await message.answer(preview_text("Проверьте смену перед отправкой", lines), reply_markup=yes_no_kb("shift_confirm"))
+    await message.answer(preview_text("Проверьте смену перед отправкой", lines), reply_markup=_shift_preview_kb(st))
 
 @router.callback_query(F.data.startswith("shift_confirm:"))
 async def shift_confirm(call: CallbackQuery, state: FSMContext, **data):
     user = get_db_user(data, call.message)
     ensure_role(user, {Role.Admin, Role.Operator})
     decision = call.data.split(":")[1]
+    if decision == "edit_comment":
+        await state.set_state(ShiftCloseState.waiting_comment)
+        await call.message.answer(wizard_text("Закрытие смены", step=6, total=7, body_lines=["Введите новый комментарий или отправьте '-'."]))
+        await call.answer()
+        return
+    if decision == "edit_crushed":
+        await state.set_state(ShiftCloseState.waiting_crushed)
+        await call.message.answer(wizard_text("Закрытие смены ДУ", step=3, total=6, body_lines=["Введите новый выпуск щебня в тоннах."]))
+        await call.answer()
+        return
+    if decision == "edit_screening":
+        await state.set_state(ShiftCloseState.waiting_screening)
+        await call.message.answer(wizard_text("Закрытие смены ДУ", step=4, total=6, body_lines=["Введите новый выпуск отсева в тоннах."]))
+        await call.answer()
+        return
+    if decision == "edit_sand":
+        await state.set_state(ShiftCloseState.waiting_sand)
+        await call.message.answer(wizard_text("Закрытие смены ДУ", step=5, total=6, body_lines=["Введите новый выпуск песка в тоннах."]))
+        await call.answer()
+        return
+    if decision == "edit_counterparty":
+        counterparties = _get_counterparty_registry()
+        await state.set_state(ShiftCloseState.waiting_counterparty)
+        await call.message.answer(
+            wizard_text("Закрытие смены РБУ", step=3, total=7, body_lines=["Выберите нового контрагента."]),
+            reply_markup=counterparty_registry_kb(counterparties),
+        )
+        await call.answer()
+        return
+    if decision == "edit_concrete":
+        marks = _get_concrete_marks()
+        await state.update_data(concrete=[], concrete_mark="")
+        await state.set_state(ShiftCloseState.waiting_concrete_mark)
+        await call.message.answer(
+            wizard_text("Закрытие смены РБУ", step=4, total=7, body_lines=["Выберите марку бетона заново."]),
+            reply_markup=concrete_mark_kb(marks),
+        )
+        await call.answer()
+        return
     if decision != "yes":
         await state.clear()
         await call.message.answer("❌ Отправка отменена.", reply_markup=production_menu(user.role))

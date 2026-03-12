@@ -39,6 +39,7 @@ from apps.bot.keyboards import (
     pager_kb,
     material_price_kb,
     overhead_cost_kb,
+    preview_actions_kb,
     concrete_cost_mark_kb,
 )
 from apps.bot.states import (
@@ -52,7 +53,7 @@ from apps.bot.states import (
     MaterialPriceState,
     OverheadCostState,
 )
-from apps.bot.ui import list_text, section_text
+from apps.bot.ui import list_text, preview_text, section_text
 from apps.bot.utils import get_db_user, ensure_role
 
 from apps.worker.celery_app import celery
@@ -789,13 +790,19 @@ async def realization_price(message: Message, state: FSMContext, **data):
     total_amount = round(qty * unit_price, 2)
     await state.update_data(realize_unit_price=unit_price, realize_total_amount=total_amount)
     await state.set_state(RealizationState.waiting_confirm)
-    b = InlineKeyboardBuilder()
-    b.button(text="✅ Сохранить реализацию", callback_data="realize_confirm:save")
-    b.button(text="✏️ Изменить цену", callback_data="realize_confirm:edit_price")
-    b.button(text="↩️ Изменить объем", callback_data="realize_confirm:edit_qty")
-    b.button(text="❌ Отмена", callback_data="realize_confirm:cancel")
-    b.adjust(1, 2, 1)
-    await message.answer(_realization_preview_text(meta, qty, unit_price), reply_markup=b.as_markup())
+    preview_lines = _realization_preview_text(meta, qty, unit_price).splitlines()
+    if preview_lines and preview_lines[0].startswith("Проверьте данные перед сохранением"):
+        preview_lines = preview_lines[1:]
+        if preview_lines and preview_lines[0] == "":
+            preview_lines = preview_lines[1:]
+    await message.answer(
+        preview_text("Проверьте реализацию", preview_lines, approve_hint="Подтвердите сохранение или измените поле."),
+        reply_markup=preview_actions_kb(
+            "realize_confirm",
+            [("✏️ Цена", "edit_price"), ("✏️ Объем", "edit_qty")],
+            confirm_label="✅ Сохранить реализацию",
+        ),
+    )
 
 @router.callback_query(F.data.startswith("realize_confirm:"))
 async def realization_confirm_action(call: CallbackQuery, state: FSMContext, **data):
@@ -804,7 +811,7 @@ async def realization_confirm_action(call: CallbackQuery, state: FSMContext, **d
     action = (call.data or "").split(":", 1)[1]
     st = await state.get_data()
 
-    if action == "cancel":
+    if action == "no" or action == "cancel":
         await state.clear()
         await call.message.answer("Реализация отменена.", reply_markup=finance_menu(user.role))
         await call.answer()
@@ -823,7 +830,7 @@ async def realization_confirm_action(call: CallbackQuery, state: FSMContext, **d
         await call.message.answer(f"Введите новую цену за 1 {meta.get('uom') or 'ед.'} (KGS).")
         await call.answer()
         return
-    if action != "save":
+    if action != "yes" and action != "save":
         await call.answer()
         return
 

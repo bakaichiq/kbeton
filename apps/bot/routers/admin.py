@@ -24,6 +24,7 @@ from apps.bot.keyboards import (
     invite_role_kb,
     INVITE_ROLE_OPTIONS,
     pager_kb,
+    preview_actions_kb,
     yes_no_kb,
 )
 
@@ -129,7 +130,10 @@ async def set_role_role(message: Message, state: FSMContext, **data):
                 f"Новая роль: {role.value}",
             ],
         ),
-        reply_markup=yes_no_kb("admin_set_role"),
+        reply_markup=preview_actions_kb(
+            "admin_set_role",
+            [("✏️ Изменить роль", "edit_role")],
+        ),
     )
 
 
@@ -138,6 +142,21 @@ async def set_role_confirm(call, state: FSMContext, **data):
     admin = get_db_user(data, call.message)
     ensure_role(admin, {Role.Admin})
     decision = call.data.split(":")[1]
+    if decision == "edit_role":
+        st = await state.get_data()
+        tg_id = int(st["target_tg_id"])
+        await state.set_state(AdminSetRoleState.waiting_role)
+        await call.message.answer(
+            wizard_text(
+                "Назначение роли",
+                step=2,
+                total=3,
+                body_lines=[f"TG ID: {tg_id}", "Выберите новую роль кнопкой."],
+            ),
+            reply_markup=admin_role_kb(),
+        )
+        await call.answer()
+        return
     if decision != "yes":
         await state.clear()
         await call.message.answer("❌ Назначение роли отменено.")
@@ -342,7 +361,18 @@ async def recipe_additives(message: Message, state: FSMContext, **data):
                 f"Добавки: {qty:.3f} л",
             ],
         ),
-        reply_markup=yes_no_kb("recipe_save"),
+        reply_markup=preview_actions_kb(
+            "recipe_save",
+            [
+                ("✏️ Цемент", "edit_cement"),
+                ("✏️ Песок", "edit_sand"),
+                ("✏️ Щебень", "edit_crushed"),
+                ("✏️ Отсев", "edit_screening"),
+                ("✏️ Вода", "edit_water"),
+                ("✏️ Добавки", "edit_additives"),
+            ],
+            confirm_label="✅ Сохранить",
+        ),
     )
 
 
@@ -351,6 +381,43 @@ async def recipe_save_confirm(call, state: FSMContext, **data):
     user = get_db_user(data, call.message)
     ensure_role(user, {Role.Admin})
     decision = call.data.split(":")[1]
+    if decision.startswith("edit_"):
+        target = decision.removeprefix("edit_")
+        state_map = {
+            "cement": ConcreteRecipeState.waiting_cement,
+            "sand": ConcreteRecipeState.waiting_sand,
+            "crushed": ConcreteRecipeState.waiting_crushed,
+            "screening": ConcreteRecipeState.waiting_screening,
+            "water": ConcreteRecipeState.waiting_water,
+            "additives": ConcreteRecipeState.waiting_additives,
+        }
+        prompt_map = {
+            "cement": "Введите цемент в кг на 1 м3.",
+            "sand": "Введите песок в тн на 1 м3.",
+            "crushed": "Введите щебень в тн на 1 м3.",
+            "screening": "Введите отсев в тн на 1 м3.",
+            "water": "Введите воду в литрах на 1 м3.",
+            "additives": "Введите добавки в литрах на 1 м3.",
+        }
+        step_map = {
+            "cement": 1,
+            "sand": 2,
+            "crushed": 3,
+            "screening": 4,
+            "water": 5,
+            "additives": 6,
+        }
+        await state.set_state(state_map[target])
+        await call.message.answer(
+            wizard_text(
+                "Рецептура бетона",
+                step=step_map[target],
+                total=8,
+                body_lines=[prompt_map[target]],
+            )
+        )
+        await call.answer()
+        return
     if decision != "yes":
         await state.clear()
         await call.message.answer("❌ Сохранение рецептуры отменено.")
