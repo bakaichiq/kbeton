@@ -323,6 +323,12 @@ def _clip(value: str, size: int) -> str:
         return value
     return value[: max(1, size - 1)] + "…"
 
+def _kv_line(label: str, value: str, width: int = 22) -> str:
+    return f"{_clip(label, width):<{width}} {value}"
+
+def _amount_line(label: str, amount: float, width: int = 22) -> str:
+    return f"{_clip(label, width):.<{width}} {_fmt_money(amount)}"
+
 def _latest_counterparty_snapshot_map(session) -> tuple[CounterpartySnapshot | None, dict[str, CounterpartyBalance]]:
     snap = session.query(CounterpartySnapshot).order_by(CounterpartySnapshot.id.desc()).first()
     if not snap:
@@ -347,12 +353,12 @@ def _dashboard_realization_lines(session, *, start: date, end: date, cp_map: dic
         .limit(5)
         .all()
     )
-    lines = ["Реализация:"]
+    lines = ["РЕАЛИЗАЦИЯ"]
     if not rows:
         lines.append("- нет данных")
         return lines
 
-    for counterparty_name, product_type, mark, uom, realized_qty, total_amount in rows:
+    for idx, (counterparty_name, product_type, mark, uom, realized_qty, total_amount) in enumerate(rows):
         cp_name = (counterparty_name or "").strip()
         cp_norm = norm_counterparty_name(cp_name)
         cp_row = cp_map.get(cp_norm) if cp_norm else None
@@ -365,12 +371,13 @@ def _dashboard_realization_lines(session, *, start: date, end: date, cp_map: dic
         product_name = _product_type_label(product_type)
         if product_type == ProductType.concrete and (mark or "").strip():
             product_name = (mark or "").strip()
-        lines.append(
-            f"- {_clip(cp_name or 'Без контрагента', 14):<14} | "
-            f"{_clip(product_name, 8):<8} | "
-            f"{_fmt_qty(realized_qty, uom):<10} | "
-            f"{_fmt_money(total_amount):<12} | {status}"
-        )
+        lines.append(f"▪ {_clip(cp_name or 'Без контрагента', 28)}")
+        lines.append(f"  марка:  {product_name}")
+        lines.append(f"  объем:  {_fmt_qty(realized_qty, uom)}")
+        lines.append(f"  сумма:  {_fmt_money(total_amount)}")
+        lines.append(f"  статус: {status}")
+        if idx != len(rows) - 1:
+            lines.append("")
     return lines
 
 def _dashboard_counterparty_lines(title: str, rows: list[tuple[str, float]]) -> list[str]:
@@ -379,7 +386,8 @@ def _dashboard_counterparty_lines(title: str, rows: list[tuple[str, float]]) -> 
         lines.append("- нет данных")
         return lines
     for name, amount in rows[:5]:
-        lines.append(f"- {_clip(name, 22):<22} {_fmt_money(amount)}")
+        lines.append(f"▪ {_clip(name, 24)}")
+        lines.append(f"  {_fmt_money(amount)}")
     return lines
 
 def _dashboard_production_lines(session, *, start: date, end: date) -> list[str]:
@@ -426,7 +434,7 @@ def _dashboard_production_lines(session, *, start: date, end: date) -> list[str]
         label = _product_type_label(ptype)
         if ptype == ProductType.concrete.value and mark:
             label = mark
-        lines.append(f"- {_clip(label, 22):<22} {_fmt_qty(qty, uom)}")
+        lines.append(f"▪ {_kv_line(label, _fmt_qty(qty, uom))}")
     return lines
 
 def _dashboard_inventory_lines(session) -> list[str]:
@@ -462,9 +470,9 @@ def _dashboard_inventory_lines(session) -> list[str]:
         item = selected.get(label)
         if item:
             _raw_name, qty, uom = item
-            lines.append(f"- {label:<22} {_fmt_qty(qty, uom)}")
+            lines.append(f"▪ {_kv_line(label, _fmt_qty(qty, uom))}")
         else:
-            lines.append(f"- {label:<22} нет данных")
+            lines.append(f"▪ {_kv_line(label, 'нет данных')}")
     return lines
 
 def _build_dashboard_text(session, *, start: date, end: date) -> str:
@@ -482,24 +490,56 @@ def _build_dashboard_text(session, *, start: date, end: date) -> str:
     )
 
     lines = [
-        "Дашборд",
+        "▌ ДАШБОРД",
+        f"  {end.strftime('%d.%m.%Y')}",
         "",
-        f"Дата: {end.strftime('%d.%m.%Y')}",
-        "Р/с: нет данных",
-        "Касса: нет данных",
-        "",
-        * _dashboard_realization_lines(session, start=start, end=end, cp_map=cp_map),
-        "",
-        * _dashboard_counterparty_lines("Д/з задолженность:", debtors),
-        "",
-        * _dashboard_counterparty_lines("К/з задолженность:", creditors),
-        "",
-        * _dashboard_production_lines(session, start=start, end=end),
-        "",
-        * _dashboard_inventory_lines(session),
+        "◾ ДЕНЬГИ",
+        f"  Р/с:   нет данных",
+        f"  Касса: нет данных",
     ]
     if snap:
-        lines.insert(6, f"Снимок взаиморасчетов: {snap.snapshot_date.strftime('%d.%m.%Y')}")
+        lines.append(f"  Снимок взаиморасчетов: {snap.snapshot_date.strftime('%d.%m.%Y')}")
+
+    realization_lines = _dashboard_realization_lines(session, start=start, end=end, cp_map=cp_map)
+    lines.extend(["", f"◾ {realization_lines[0]}"])
+    if len(realization_lines) == 2 and realization_lines[1] == "- нет данных":
+        lines.append("  нет данных")
+    else:
+        for line in realization_lines[1:]:
+            lines.append(line if not line else f"  {line}")
+
+    debt_lines = _dashboard_counterparty_lines("Д/З ЗАДОЛЖЕННОСТЬ", debtors)
+    lines.extend(["", f"◾ {debt_lines[0]}"])
+    for line in debt_lines[1:]:
+        if line == "- нет данных":
+            lines.append("  нет данных")
+        else:
+            lines.append(f"  {line}")
+
+    credit_lines = _dashboard_counterparty_lines("К/З ЗАДОЛЖЕННОСТЬ", creditors)
+    lines.extend(["", f"◾ {credit_lines[0]}"])
+    for line in credit_lines[1:]:
+        if line == "- нет данных":
+            lines.append("  нет данных")
+        else:
+            lines.append(f"  {line}")
+
+    prod_lines = _dashboard_production_lines(session, start=start, end=end)
+    lines.extend(["", f"◾ {prod_lines[0].rstrip(':')}"])
+    for line in prod_lines[1:]:
+        if line == "- нет данных":
+            lines.append("  нет данных")
+        else:
+            lines.append(f"  {line}")
+
+    stock_lines = _dashboard_inventory_lines(session)
+    lines.extend(["", f"◾ {stock_lines[0].rstrip(':')}"])
+    for line in stock_lines[1:]:
+        if line == "- нет данных":
+            lines.append("  нет данных")
+        else:
+            lines.append(f"  {line}")
+
     return "\n".join(lines)
 
 def _realization_candidates(session):
