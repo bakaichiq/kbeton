@@ -77,6 +77,9 @@ class ConcreteRecipeState(StatesGroup):
     waiting_water = State()
     waiting_additives = State()
 
+class InviteLinkState(StatesGroup):
+    waiting_role = State()
+
 class MaterialPriceState(StatesGroup):
     waiting_item = State()
     waiting_price = State()

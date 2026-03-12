@@ -12,9 +12,11 @@ from kbeton.models.audit import AuditLog
 from kbeton.models.recipes import ConcreteRecipe
 from kbeton.models.inventory import InventoryItem, InventoryBalance
 from kbeton.services.audit import audit_log
+from kbeton.services.invites import create_user_invite
 
-from apps.bot.states import AdminSetRoleState, ConcreteRecipeState
+from apps.bot.states import AdminSetRoleState, ConcreteRecipeState, InviteLinkState
 from apps.bot.utils import get_db_user, ensure_role
+from apps.bot.keyboards import concrete_recipe_mark_kb, CONCRETE_RECIPE_MARKS, invite_role_kb, INVITE_ROLE_OPTIONS
 
 router = Router()
 
@@ -125,17 +127,58 @@ async def recipes_list(message: Message, state: FSMContext, **data):
                 f"щебень {float(r.crushed_stone_t):.3f} тн; отсев {float(r.screening_t):.3f} тн; "
                 f"вода {float(r.water_l or 0):.3f} л; добавки {float(r.additives_l or 0):.3f} л"
             )
-    lines.append("\nЧтобы добавить/изменить: введите марку (например M300).")
+    lines.append("\nЧтобы добавить/изменить: выберите марку бетона.")
     await state.set_state(ConcreteRecipeState.waiting_mark)
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines), reply_markup=concrete_recipe_mark_kb())
+
+@router.message(F.text == "🔗 Пригласить пользователя")
+async def invite_user_start(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin})
+    await state.set_state(InviteLinkState.waiting_role)
+    await message.answer(
+        "Выберите роль для приглашения.\n"
+        "Ссылка будет одноразовой.",
+        reply_markup=invite_role_kb(),
+    )
+
+@router.message(InviteLinkState.waiting_role)
+async def invite_user_role(message: Message, state: FSMContext, **data):
+    user = get_db_user(data, message)
+    ensure_role(user, {Role.Admin})
+    role_txt = (message.text or "").strip()
+    if role_txt not in INVITE_ROLE_OPTIONS:
+        await message.answer("Выберите роль кнопкой.", reply_markup=invite_role_kb())
+        return
+
+    role = Role(role_txt)
+    with session_scope() as session:
+        invite = create_user_invite(session, role=role, created_by_user_id=user.id)
+        audit_log(
+            session,
+            actor_user_id=user.id,
+            action="user_invite_create",
+            entity_type="user_invite",
+            entity_id=str(invite.id),
+            payload={"role": role.value, "token": invite.token},
+        )
+
+    bot_info = await message.bot.get_me()
+    invite_link = f"https://t.me/{bot_info.username}?start=invite_{invite.token}"
+    await state.clear()
+    await message.answer(
+        "✅ Одноразовая ссылка создана.\n"
+        f"Роль: {role.value}\n"
+        f"Ссылка: {invite_link}"
+    )
 
 @router.message(ConcreteRecipeState.waiting_mark)
 async def recipe_mark(message: Message, state: FSMContext, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin})
     mark = (message.text or "").strip().upper()
-    if not mark:
-        await message.answer("Нужно ввести марку, например M300.")
+    if mark not in CONCRETE_RECIPE_MARKS:
+        await message.answer("Выберите марку бетона кнопкой.", reply_markup=concrete_recipe_mark_kb())
         return
     await state.update_data(mark=mark)
     await state.set_state(ConcreteRecipeState.waiting_cement)

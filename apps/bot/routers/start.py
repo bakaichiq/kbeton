@@ -8,15 +8,47 @@ from aiogram.types import Message
 from apps.bot.keyboards import main_menu, finance_menu, production_menu, warehouse_menu, admin_menu
 from apps.bot.utils import get_db_user, ensure_role
 from kbeton.models.enums import Role
+from kbeton.db.session import session_scope
+from kbeton.models.user import User
+from kbeton.services.audit import audit_log
+from kbeton.services.invites import consume_user_invite
 
 router = Router()
+
+def _extract_start_arg(text: str | None) -> str:
+    parts = (text or "").strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return ""
+    return parts[1].strip()
 
 @router.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext, **data):
     await state.clear()
     user = get_db_user(data, message)
+    start_arg = _extract_start_arg(message.text)
+    invite_notice = ""
+    if start_arg.startswith("invite_"):
+        token = start_arg.removeprefix("invite_").strip()
+        with session_scope() as session:
+            db_user = session.query(User).filter(User.id == user.id).one()
+            invite = consume_user_invite(session, token=token, user=db_user)
+            if invite is not None:
+                audit_log(
+                    session,
+                    actor_user_id=db_user.id,
+                    action="user_invite_consume",
+                    entity_type="user_invite",
+                    entity_id=str(invite.id),
+                    payload={"role": invite.role.value},
+                )
+                user = db_user
+                data["db_user"] = user
+                invite_notice = "✅ Приглашение применено.\n"
+            else:
+                invite_notice = "⚠️ Ссылка приглашения недействительна или уже использована.\n"
     await message.answer(
-        f"Привет! Я бот учета бетонного завода.\n"
+        invite_notice
+        + f"Привет! Я бот учета бетонного завода.\n"
         f"Ваш доступ: {user.role.value}.\n"
         f"Выберите раздел:",
         reply_markup=main_menu(user.role),

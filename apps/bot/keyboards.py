@@ -4,6 +4,9 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 from kbeton.models.enums import Role
 
+CONCRETE_RECIPE_MARKS = ["M100", "M150", "M200", "M250", "M300", "M350", "M400"]
+INVITE_ROLE_OPTIONS = ["Viewer", "FinDir", "HeadProd", "Operator", "Warehouse"]
+
 def _role_allowed(role: Role | None, allowed: set[Role]) -> bool:
     if role is None:
         return True
@@ -116,6 +119,26 @@ def concrete_mark_kb(marks: list[str]) -> ReplyKeyboardMarkup:
     _adjust_rows(kb, [2, 1], len(marks) + 1)
     return kb.as_markup(resize_keyboard=True)
 
+def concrete_recipe_mark_kb() -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardBuilder()
+    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
+    for text in base_buttons:
+        kb.add(KeyboardButton(text=text))
+    for text in CONCRETE_RECIPE_MARKS:
+        kb.add(KeyboardButton(text=text))
+    _adjust_rows(kb, [2, 1], len(CONCRETE_RECIPE_MARKS))
+    return kb.as_markup(resize_keyboard=True)
+
+def invite_role_kb() -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardBuilder()
+    base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
+    for text in base_buttons:
+        kb.add(KeyboardButton(text=text))
+    for text in INVITE_ROLE_OPTIONS:
+        kb.add(KeyboardButton(text=text))
+    _adjust_rows(kb, [2, 1], len(INVITE_ROLE_OPTIONS))
+    return kb.as_markup(resize_keyboard=True)
+
 def concrete_more_kb() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
     base_buttons = ["⬅️ Назад", "🏠 Главное меню", "❌ Отмена"]
@@ -164,6 +187,7 @@ def admin_menu(role: Role | None = None) -> ReplyKeyboardMarkup:
         action_buttons.append("👤 Пользователи и роли")
         action_buttons.append("⚙️ Настройки/справочники")
         action_buttons.append("🧪 Рецептуры бетона")
+        action_buttons.append("🔗 Пригласить пользователя")
         action_buttons.append("🕒 Последние изменения")
     for text in action_buttons:
         kb.add(KeyboardButton(text=text))
