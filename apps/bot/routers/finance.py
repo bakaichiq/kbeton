@@ -53,7 +53,7 @@ from apps.bot.states import (
     MaterialPriceState,
     OverheadCostState,
 )
-from apps.bot.ui import list_text, preview_text, section_text
+from apps.bot.ui import list_text, preview_text, section_text, wizard_text
 from apps.bot.utils import get_db_user, ensure_role
 
 from apps.worker.celery_app import celery
@@ -456,7 +456,15 @@ async def cp_upload_prompt(message: Message, state: FSMContext, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.FinDir})
     await state.set_state(CounterpartyUploadState.waiting_file)
-    await message.answer("Отправьте XLSX снимок взаиморасчетов (контрагенты).")
+    await message.answer(
+        wizard_text(
+            "Импорт взаиморасчетов",
+            step=1,
+            total=1,
+            body_lines=["Отправьте XLSX-файл со снимком взаиморасчетов по контрагентам."],
+            hint="Файл нужно отправить как документ.",
+        )
+    )
 
 @router.message(CounterpartyUploadState.waiting_file, F.document)
 async def cp_upload_handle(message: Message, state: FSMContext, **data):
@@ -483,11 +491,19 @@ async def cp_upload_handle(message: Message, state: FSMContext, **data):
 
     celery.send_task("apps.worker.tasks.process_counterparty_import", args=[job_id])
     await state.clear()
-    await message.answer(f"✅ Импорт контрагентов создан. job_id={job_id}.", reply_markup=finance_menu(user.role))
+    await message.answer(
+        section_text(
+            "Импорт создан",
+            [f"job_id: {job_id}", f"Файл: {doc.file_name}"],
+            icon="✅",
+            hint="Статус можно посмотреть в разделе '📦 Статус импорта'.",
+        ),
+        reply_markup=finance_menu(user.role),
+    )
 
 @router.message(CounterpartyUploadState.waiting_file)
 async def cp_upload_waiting(message: Message, **data):
-    await message.answer("Пожалуйста, отправьте XLSX как файл (document) или напишите 'отмена'.")
+    await message.answer(section_text("Импорт взаиморасчетов", ["Нужно отправить XLSX как документ."], icon="⚠️", hint="Или нажмите 'Отмена'."))
 
 @router.message(F.text == "📦 Статус импорта")
 async def import_status(message: Message, **data):
@@ -501,9 +517,9 @@ async def import_status(message: Message, **data):
             .all()
         )
     if not jobs:
-        await message.answer("Импортов пока нет.")
+        await message.answer(section_text("Статус импорта", ["Импортов пока нет."], icon="📦", hint="Сначала загрузите XLSX взаиморасчетов."))
         return
-    lines = ["📦 Последние импорты (до 10):"]
+    lines = []
     for j in jobs:
         status = j.status
         summary = j.summary or {}
@@ -516,14 +532,21 @@ async def import_status(message: Message, **data):
         if err:
             parts.append(f"ошибка: {err}")
         lines.append(" | ".join(parts))
-    await message.answer("\n".join(lines))
+    await message.answer(section_text("Статус импорта", lines, icon="📦", hint="Показаны последние 10 импортов."))
 
 @router.message(F.text == "➕ Добавить контрагента")
 async def counterparty_add_prompt(message: Message, state: FSMContext, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.FinDir})
     await state.set_state(CounterpartyAddState.waiting_name)
-    await message.answer("Введите название контрагента для добавления в реестр.")
+    await message.answer(
+        wizard_text(
+            "Добавление контрагента",
+            step=1,
+            total=1,
+            body_lines=["Введите название контрагента для добавления в реестр."],
+        )
+    )
 
 @router.message(CounterpartyAddState.waiting_name)
 async def counterparty_add_save(message: Message, state: FSMContext, **data):
@@ -542,7 +565,7 @@ async def counterparty_add_save(message: Message, state: FSMContext, **data):
         await message.answer("Не удалось сохранить контрагента. Попробуйте еще раз.")
         return
     await state.clear()
-    await message.answer(f"✅ Контрагент добавлен: {saved_name}", reply_markup=finance_menu(user.role))
+    await message.answer(section_text("Контрагент добавлен", [saved_name], icon="✅"), reply_markup=finance_menu(user.role))
 
 @router.message(F.text == "💸 Реализация")
 async def realization_menu(message: Message, **data):
@@ -552,21 +575,15 @@ async def realization_menu(message: Message, **data):
         candidates = _realization_candidates(session)
         audit_log(session, actor_user_id=user.id, action="realization_candidates_view", entity_type="production_output", entity_id="", payload={"count": len(candidates)})
     if not candidates:
-        await message.answer(
-            "💸 Реализация\n\n"
-            "Нет доступных позиций для продажи.\n"
-            "Позиции появятся после согласования смены производства."
-        )
+        await message.answer(section_text("Реализация", ["Нет доступных позиций для продажи."], icon="💸", hint="Позиции появятся после согласования смен производства."))
         return
     b = InlineKeyboardBuilder()
     lines = [
-        "💸 Реализация",
-        "",
         "Выберите позицию из согласованного выпуска.",
         "Показываются только позиции с остатком к реализации.",
         f"Доступно позиций: {len(candidates)}",
         "",
-        "Список (первые 20):",
+        "Первые 20 позиций:",
     ]
     for c in candidates[:20]:
         text = f"{c['date'].isoformat()} | смена #{c['shift_id']} | {c['product_type']} {c['mark'] or '-'} | остаток {c['remaining_qty']:.3f} {c['uom']}"
@@ -576,7 +593,7 @@ async def realization_menu(message: Message, **data):
         button_text = f"Смена #{c['shift_id']} • {c['mark'] or c['product_type']} • {c['remaining_qty']:.1f} {c['uom']}"
         b.button(text=button_text[:64], callback_data=f"realize_pick:{c['output_id']}")
     b.adjust(1)
-    await message.answer("\n".join(lines), reply_markup=b.as_markup())
+    await message.answer(section_text("Реализация", lines, icon="💸"), reply_markup=b.as_markup())
 
 @router.message(F.text == "✅ Согласование расходов")
 async def expense_approval_menu(message: Message, **data):
@@ -593,20 +610,14 @@ async def expense_approval_menu(message: Message, **data):
             payload={"count": len(rows)},
         )
     if not rows:
-        await message.answer(
-            "✅ Согласование расходов\n\n"
-            "Нет заявок на согласование.\n"
-            "Они появятся после складского прихода с ценой/суммой."
-        )
+        await message.answer(section_text("Согласование расходов", ["Нет заявок на согласование."], icon="✅", hint="Они появятся после складского прихода с ценой и суммой."))
         return
     b = InlineKeyboardBuilder()
     lines = [
-        "✅ Согласование расходов",
-        "",
-        "Ниже заявки из склада (приходы), которые еще не проведены в P&L.",
+        "Ниже заявки из склада, которые еще не проведены в P&L.",
         f"Ожидает согласования: {len(rows)}",
         "",
-        "Список (первые 30):",
+        "Первые 30 заявок:",
     ]
     for r in rows:
         lines.append(
@@ -617,7 +628,7 @@ async def expense_approval_menu(message: Message, **data):
             callback_data=f"invexp_pick:{r['txn_id']}",
         )
     b.adjust(1)
-    await message.answer("\n".join(lines), reply_markup=b.as_markup())
+    await message.answer(section_text("Согласование расходов", lines, icon="✅"), reply_markup=b.as_markup())
 
 @router.callback_query(F.data.startswith("invexp_pick:"))
 async def expense_approval_pick(call: CallbackQuery, **data):
@@ -635,7 +646,15 @@ async def expense_approval_pick(call: CallbackQuery, **data):
     b.button(text="✅ Согласовать расход", callback_data=f"invexp_approve:{txn_id}")
     b.button(text="↩️ К списку", callback_data="invexp_back:list")
     b.adjust(1)
-    await call.message.answer(_pending_expense_caption(selected), reply_markup=b.as_markup())
+    caption_lines = _pending_expense_caption(selected).splitlines()
+    await call.message.answer(
+        preview_text(
+            "Проверьте заявку на расход",
+            caption_lines,
+            approve_hint="Подтвердите проведение в P&L или вернитесь к списку.",
+        ),
+        reply_markup=b.as_markup(),
+    )
     await call.answer()
 
 @router.callback_query(F.data == "invexp_back:list")
@@ -713,11 +732,17 @@ async def expense_approval_approve(call: CallbackQuery, **data):
         unit_price = float(txn.unit_price or 0)
 
     await call.message.answer(
-        "✅ Расход согласован и проведен в P&L\n"
-        f"Материал: {item_name}\n"
-        f"Объем: {qty:.3f} {uom}\n"
-        f"Цена: {unit_price:.2f} KGS/{uom}\n"
-        f"Сумма: {total_cost:.2f} KGS",
+        section_text(
+            "Расход согласован",
+            [
+                f"Материал: {item_name}",
+                f"Объем: {qty:.3f} {uom}",
+                f"Цена: {unit_price:.2f} KGS/{uom}",
+                f"Сумма: {total_cost:.2f} KGS",
+            ],
+            icon="✅",
+            hint="Расход проведен в P&L.",
+        ),
         reply_markup=finance_menu(user.role),
     )
     await call.answer()
@@ -737,10 +762,19 @@ async def realization_pick(call: CallbackQuery, state: FSMContext, **data):
     await state.update_data(realize_output_id=output_id, realize_meta=selected)
     await state.set_state(RealizationState.waiting_qty)
     await call.message.answer(
-        "Вы выбрали позицию для реализации:\n\n"
-        f"{_realization_item_caption(selected)}\n\n"
-        f"Шаг 1/2: Введите объем реализации в {selected['uom']}.\n"
-        "Пример: 12.5"
+        wizard_text(
+            "Реализация",
+            step=1,
+            total=2,
+            body_lines=[
+                "Вы выбрали позицию для реализации:",
+                "",
+                *_realization_item_caption(selected).splitlines(),
+                "",
+                f"Введите объем реализации в {selected['uom']}.",
+            ],
+            hint="Пример: 12.5",
+        )
     )
     await call.answer()
 
@@ -768,8 +802,13 @@ async def realization_qty(message: Message, state: FSMContext, **data):
     await state.update_data(realize_qty=qty)
     await state.set_state(RealizationState.waiting_unit_price)
     await message.answer(
-        f"Шаг 2/2: Введите цену реализации за 1 {meta.get('uom') or 'ед.'} (KGS).\n"
-        "Пример: 4200"
+        wizard_text(
+            "Реализация",
+            step=2,
+            total=2,
+            body_lines=[f"Введите цену реализации за 1 {meta.get('uom') or 'ед.'} (KGS)."],
+            hint="Пример: 4200",
+        )
     )
 
 @router.message(RealizationState.waiting_unit_price)
@@ -820,14 +859,29 @@ async def realization_confirm_action(call: CallbackQuery, state: FSMContext, **d
         meta = st.get("realize_meta") or {}
         await state.set_state(RealizationState.waiting_qty)
         await call.message.answer(
-            f"Введите новый объем реализации (доступно: {float(meta.get('remaining_qty') or 0):.3f} {meta.get('uom') or ''})."
+            wizard_text(
+                "Изменение объема",
+                step=1,
+                total=1,
+                body_lines=[
+                    f"Введите новый объем реализации.",
+                    f"Доступно: {float(meta.get('remaining_qty') or 0):.3f} {meta.get('uom') or ''}",
+                ],
+            )
         )
         await call.answer()
         return
     if action == "edit_price":
         meta = st.get("realize_meta") or {}
         await state.set_state(RealizationState.waiting_unit_price)
-        await call.message.answer(f"Введите новую цену за 1 {meta.get('uom') or 'ед.'} (KGS).")
+        await call.message.answer(
+            wizard_text(
+                "Изменение цены",
+                step=1,
+                total=1,
+                body_lines=[f"Введите новую цену за 1 {meta.get('uom') or 'ед.'} (KGS)."],
+            )
+        )
         await call.answer()
         return
     if action != "yes" and action != "save":
@@ -891,11 +945,16 @@ async def realization_confirm_action(call: CallbackQuery, state: FSMContext, **d
         product_label = f"{product_type_ru} {out.mark or ''}".strip()
     await state.clear()
     await call.message.answer(
-        f"✅ Реализация сохранена\n"
-        f"{product_label}: {qty:.3f} {uom}\n"
-        f"Цена: {unit_price:.3f} KGS/{uom}\n"
-        f"Сумма: {total_amount:.2f} KGS\n\n"
-        "Сумма добавлена в финансы и попадет в P&L/дашборд.",
+        section_text(
+            "Реализация сохранена",
+            [
+                f"{product_label}: {qty:.3f} {uom}",
+                f"Цена: {unit_price:.3f} KGS/{uom}",
+                f"Сумма: {total_amount:.2f} KGS",
+            ],
+            icon="✅",
+            hint="Сумма добавлена в финансы и попадет в P&L/дашборд.",
+        ),
         reply_markup=finance_menu(user.role),
     )
     await call.answer()
@@ -904,7 +963,17 @@ async def realization_confirm_action(call: CallbackQuery, state: FSMContext, **d
 async def pnl_prompt(message: Message, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.FinDir, Role.Viewer})
-    await message.answer("Выберите период:", reply_markup=pnl_period_kb())
+    await message.answer(
+        section_text(
+            "P&L",
+            [
+                "Выберите период, чтобы получить сводку и XLSX-отчет.",
+                "Доступны день, неделя, месяц, квартал и год.",
+            ],
+            icon="📄",
+        ),
+        reply_markup=pnl_period_kb(),
+    )
 
 @router.message(Command("today"))
 async def pnl_today(message: Message, **data):
@@ -959,11 +1028,18 @@ async def income_articles(message: Message, state: FSMContext, **data):
     await state.set_state(ArticleAddState.waiting_name)
     with session_scope() as session:
         arts = session.query(FinanceArticle).filter(FinanceArticle.kind == TxType.income).order_by(FinanceArticle.name.asc()).all()
-        lines = ["🧾 Статьи доходов:"]
+        lines = []
         for a in arts[:50]:
-            lines.append(f"- {a.name}")
-    lines.append("\nНапишите *название новой статьи* одним сообщением (или отправьте 'отмена' / /cancel).")
-    await message.answer("\n".join(lines))
+            lines.append(f"• {a.name}")
+    await message.answer(
+        wizard_text(
+            "Статьи доходов",
+            step=1,
+            total=1,
+            body_lines=lines or ["Пока нет статей доходов."],
+            hint="Отправьте название новой статьи одним сообщением.",
+        )
+    )
 
 @router.message(F.text == "🧾 Статьи расходов")
 async def expense_articles(message: Message, state: FSMContext, **data):
@@ -973,11 +1049,18 @@ async def expense_articles(message: Message, state: FSMContext, **data):
     await state.set_state(ArticleAddState.waiting_name)
     with session_scope() as session:
         arts = session.query(FinanceArticle).filter(FinanceArticle.kind == TxType.expense).order_by(FinanceArticle.name.asc()).all()
-        lines = ["🧾 Статьи расходов:"]
+        lines = []
         for a in arts[:50]:
-            lines.append(f"- {a.name}")
-    lines.append("\nНапишите *название новой статьи* одним сообщением (или отправьте 'отмена' / /cancel).")
-    await message.answer("\n".join(lines))
+            lines.append(f"• {a.name}")
+    await message.answer(
+        wizard_text(
+            "Статьи расходов",
+            step=1,
+            total=1,
+            body_lines=lines or ["Пока нет статей расходов."],
+            hint="Отправьте название новой статьи одним сообщением.",
+        )
+    )
 
 @router.message(F.text == "📐 Правила маппинга")
 async def rules_menu(message: Message, state: FSMContext, **data):
@@ -992,15 +1075,20 @@ async def rules_menu(message: Message, state: FSMContext, **data):
             .all()
         )
         audit_log(session, actor_user_id=user.id, action="mapping_rules_view", entity_type="mapping_rule", entity_id="", payload={"count": len(rules)})
-    lines = ["📐 Правила маппинга (последние 10):"]
+    lines = []
     for r, art in rules:
-        lines.append(f"- {r.id}: {r.kind.value}/{r.pattern_type.value} prio={r.priority} '{r.pattern}' → {art.name}")
-    lines.append("\nЧтобы добавить правило, отправьте строку:")
-    lines.append("kind;pattern_type;pattern;priority;article_id")
-    lines.append("пример: expense;regex;^цемент;100;12")
-    lines.append("или: income;contains;бетон;50;Продажи бетона")
+        lines.append(f"• {r.id}: {r.kind.value}/{r.pattern_type.value} prio={r.priority} '{r.pattern}' → {art.name}")
     await state.set_state(MappingRuleAddState.waiting_rule)
-    await message.answer("\n".join(lines))
+    await message.answer(
+        wizard_text(
+            "Правила маппинга",
+            step=1,
+            total=1,
+            body_lines=lines or ["Пока нет правил маппинга."],
+            hint="Формат: kind;pattern_type;pattern;priority;article_id",
+        )
+        + "\n\nпример: expense;regex;^цемент;100;12\nили: income;contains;бетон;50;Продажи бетона"
+    )
 
 @router.message(MappingRuleAddState.waiting_rule)
 async def rules_add(message: Message, state: FSMContext, **data):
@@ -1067,7 +1155,7 @@ async def add_article(message: Message, state: FSMContext, **data):
         session.flush()
         audit_log(session, actor_user_id=user.id, action="article_add", entity_type="finance_article", entity_id=str(art.id), payload={"kind": kind.value, "name": name})
     await state.clear()
-    await message.answer(f"✅ Добавлено: {name}", reply_markup=finance_menu(user.role))
+    await message.answer(section_text("Статья добавлена", [name], icon="✅"), reply_markup=finance_menu(user.role))
 
 @router.message(F.text == "🧩 Неразобранное")
 async def unclassified(message: Message, **data):
@@ -1140,7 +1228,7 @@ async def make_rule(call: CallbackQuery, **data):
     aid = int(parts[3])
     answer = parts[4]
     if answer == "no":
-        await call.message.answer("Ок, без правила.")
+        await call.message.answer(section_text("Правило не создано", ["Транзакция уже классифицирована вручную."], icon="✅"))
         await call.answer()
         return
     kind_enum = TxType.income if kind == "income" else TxType.expense
@@ -1161,7 +1249,13 @@ async def make_rule(call: CallbackQuery, **data):
         session.add(rule)
         session.flush()
         audit_log(session, actor_user_id=user.id, action="mapping_rule_add", entity_type="mapping_rule", entity_id=str(rule.id), payload={"kind": kind_enum.value, "pattern": pattern, "article_id": aid})
-    await call.message.answer(f"✅ Правило добавлено: contains '{pattern}' → {kind_enum.value} (article_id={aid})")
+    await call.message.answer(
+        section_text(
+            "Правило добавлено",
+            [f"contains '{pattern}' → {kind_enum.value} (article_id={aid})"],
+            icon="✅",
+        )
+    )
     await call.answer()
 
 @router.message(F.text == "🏷️ Цены")
@@ -1170,15 +1264,19 @@ async def prices_menu(message: Message, state: FSMContext, **data):
     ensure_role(user, {Role.Admin, Role.FinDir})
     with session_scope() as session:
         cur = get_current_prices(session)
-    lines = ["🏷️ Текущие цены:"]
+    lines = []
     for p in cur["prices"]:
-        lines.append(f"- {p['kind']} {p['item_key']}: {p['price']} {p['currency']} (с {p['valid_from']})")
-    lines.append("\nЧтобы обновить: отправьте одной строкой:")
-    lines.append("БЕТОН:  M300=4500, M350=4800")
-    lines.append("БЛОКИ:  blocks=120")
-    lines.append("Я применю valid_from=сейчас (без согласования).")
+        lines.append(f"• {p['kind']} {p['item_key']}: {p['price']} {p['currency']} (с {p['valid_from']})")
     await state.set_state(PriceSetState.waiting_price)
-    await message.answer("\n".join(lines))
+    await message.answer(
+        wizard_text(
+            "Цены",
+            step=1,
+            total=1,
+            body_lines=lines or ["Текущих цен пока нет."],
+            hint="Отправьте одной строкой: M300=4500, M350=4800 или blocks=120",
+        )
+    )
 
 def _parse_price_line(line: str) -> list[tuple[PriceKind, str, float]]:
     # returns list of (kind, item_key, price)
@@ -1230,7 +1328,7 @@ async def prices_set(message: Message, state: FSMContext, **data):
             pv = set_price(session, kind=kind, item_key=key, price=price, currency="KGS", valid_from=now, changed_by_user_id=user.id, comment="bot update")
             audit_log(session, actor_user_id=user.id, action="price_set", entity_type="price_version", entity_id=str(pv.id), payload={"kind": kind.value, "item_key": key, "price": price})
     await state.clear()
-    await message.answer("✅ Цены обновлены.", reply_markup=finance_menu(user.role))
+    await message.answer(section_text("Цены обновлены", [", ".join(f"{key}={price:.2f}" for _, key, price in items)], icon="✅"), reply_markup=finance_menu(user.role))
 
 @router.message(F.text == "🧾 Цены материалов")
 async def material_prices_menu(message: Message, state: FSMContext, **data):
@@ -1238,16 +1336,24 @@ async def material_prices_menu(message: Message, state: FSMContext, **data):
     ensure_role(user, {Role.Admin, Role.FinDir})
     with session_scope() as session:
         cur = _latest_material_prices(session)
-    lines = ["🧾 Цены материалов (текущие):"]
+    lines = []
     for key in ["цемент", "песок", "щебень", "отсев", "вода", "добавки"]:
         p = cur.get(key)
         if p:
-            lines.append(f"- {key}: {float(p.price):.3f} {p.currency}/{p.unit} (с {p.valid_from.isoformat()})")
+            lines.append(f"• {key}: {float(p.price):.3f} {p.currency}/{p.unit} (с {p.valid_from.isoformat()})")
         else:
-            lines.append(f"- {key}: не задано")
-    lines.append("\nВыберите материал для обновления:")
+            lines.append(f"• {key}: не задано")
     await state.set_state(MaterialPriceState.waiting_item)
-    await message.answer("\n".join(lines), reply_markup=material_price_kb())
+    await message.answer(
+        wizard_text(
+            "Цены материалов",
+            step=1,
+            total=2,
+            body_lines=lines,
+            hint="Выберите материал кнопкой.",
+        ),
+        reply_markup=material_price_kb(),
+    )
 
 @router.message(MaterialPriceState.waiting_item)
 async def material_price_item(message: Message, state: FSMContext, **data):
@@ -1263,7 +1369,14 @@ async def material_price_item(message: Message, state: FSMContext, **data):
         return
     await state.update_data(item_key=t)
     await state.set_state(MaterialPriceState.waiting_price)
-    await message.answer(f"Цена за {MATERIAL_UNITS[t]} (KGS):")
+    await message.answer(
+        wizard_text(
+            "Цены материалов",
+            step=2,
+            total=2,
+            body_lines=[f"Введите цену за {MATERIAL_UNITS[t]} (KGS)."],
+        )
+    )
 
 @router.message(MaterialPriceState.waiting_price)
 async def material_price_value(message: Message, state: FSMContext, **data):
@@ -1288,7 +1401,7 @@ async def material_price_value(message: Message, state: FSMContext, **data):
         session.add(mp)
         audit_log(session, actor_user_id=user.id, action="material_price_set", entity_type="material_price", entity_id=str(mp.id or 0), payload={"item_key": key, "price": qty})
     await state.clear()
-    await message.answer("✅ Цена материала обновлена.", reply_markup=finance_menu(user.role))
+    await message.answer(section_text("Цена материала обновлена", [f"{key}: {qty:.3f} KGS/{MATERIAL_UNITS[key]}"], icon="✅"), reply_markup=finance_menu(user.role))
 
 @router.message(F.text == "⚙️ Накладные на 1м3")
 async def overhead_menu(message: Message, state: FSMContext, **data):
@@ -1296,16 +1409,24 @@ async def overhead_menu(message: Message, state: FSMContext, **data):
     ensure_role(user, {Role.Admin, Role.FinDir})
     with session_scope() as session:
         cur = _latest_overheads(session)
-    lines = ["⚙️ Накладные на 1 м3 (текущие):"]
+    lines = []
     for key in ["энергия", "амортизация"]:
         p = cur.get(key)
         if p:
-            lines.append(f"- {key}: {float(p.cost_per_m3):.3f} {p.currency}/м3 (с {p.valid_from.isoformat()})")
+            lines.append(f"• {key}: {float(p.cost_per_m3):.3f} {p.currency}/м3 (с {p.valid_from.isoformat()})")
         else:
-            lines.append(f"- {key}: не задано")
-    lines.append("\nВыберите статью накладных:")
+            lines.append(f"• {key}: не задано")
     await state.set_state(OverheadCostState.waiting_name)
-    await message.answer("\n".join(lines), reply_markup=overhead_cost_kb())
+    await message.answer(
+        wizard_text(
+            "Накладные на 1 м3",
+            step=1,
+            total=2,
+            body_lines=lines,
+            hint="Выберите статью накладных кнопкой.",
+        ),
+        reply_markup=overhead_cost_kb(),
+    )
 
 @router.message(OverheadCostState.waiting_name)
 async def overhead_name(message: Message, state: FSMContext, **data):
@@ -1321,7 +1442,14 @@ async def overhead_name(message: Message, state: FSMContext, **data):
         return
     await state.update_data(name=t)
     await state.set_state(OverheadCostState.waiting_cost)
-    await message.answer("Сумма на 1 м3 (KGS):")
+    await message.answer(
+        wizard_text(
+            "Накладные на 1 м3",
+            step=2,
+            total=2,
+            body_lines=["Введите сумму на 1 м3 (KGS)."],
+        )
+    )
 
 @router.message(OverheadCostState.waiting_cost)
 async def overhead_cost_value(message: Message, state: FSMContext, **data):
@@ -1345,7 +1473,7 @@ async def overhead_cost_value(message: Message, state: FSMContext, **data):
         session.add(oh)
         audit_log(session, actor_user_id=user.id, action="overhead_cost_set", entity_type="overhead_cost", entity_id=str(oh.id or 0), payload={"name": name, "cost": qty})
     await state.clear()
-    await message.answer("✅ Накладные обновлены.", reply_markup=finance_menu(user.role))
+    await message.answer(section_text("Накладные обновлены", [f"{name}: {qty:.3f} KGS/м3"], icon="✅"), reply_markup=finance_menu(user.role))
 
 @router.message(F.text == "📊 Себестоимость бетона")
 async def concrete_cost_report(message: Message, **data):
@@ -1356,9 +1484,9 @@ async def concrete_cost_report(message: Message, **data):
         prices = _latest_material_prices(session)
         overheads = _latest_overheads(session)
     if not recipes:
-        await message.answer("Нет активных рецептур. Добавьте в '🧪 Рецептуры бетона'.")
+        await message.answer(section_text("Себестоимость бетона", ["Нет активных рецептур."], icon="📊", hint="Добавьте их в разделе '🧪 Рецептуры бетона'."))
         return
-    lines = ["📊 Себестоимость бетона (на 1 м3):"]
+    lines = []
     total_sum = 0.0
     count = 0
     missing_any = []
@@ -1367,7 +1495,7 @@ async def concrete_cost_report(message: Message, **data):
         if missing:
             missing_any.append(f"{r.mark}: нет цены для {', '.join(sorted(set(missing)))}")
             continue
-        lines.append(f"- {r.mark}: {cost:.3f} KGS/м3")
+        lines.append(f"• {r.mark}: {cost:.3f} KGS/м3")
         total_sum += cost
         count += 1
     if count > 0:
@@ -1375,8 +1503,8 @@ async def concrete_cost_report(message: Message, **data):
     if missing_any:
         lines.append("⚠️ Нет цен для расчета:")
         for m in missing_any[:10]:
-            lines.append(f"- {m}")
-    await message.answer("\n".join(lines))
+            lines.append(f"• {m}")
+    await message.answer(section_text("Себестоимость бетона", lines, icon="📊"))
 
 @router.message(F.text == "📊 Дашборд")
 async def dashboard_quick(message: Message, **data):
