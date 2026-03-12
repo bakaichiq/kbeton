@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import uuid
 from datetime import date, datetime, timedelta
 
@@ -16,7 +17,7 @@ from kbeton.models.recipes import ConcreteRecipe
 from kbeton.models.finance import ImportJob, FinanceArticle, FinanceTransaction, MappingRule
 from kbeton.models.counterparty import CounterpartySnapshot, CounterpartyBalance
 from kbeton.models.production import ProductionShift, ProductionOutput, ProductionRealization
-from kbeton.models.inventory import InventoryTxn, InventoryItem
+from kbeton.models.inventory import InventoryTxn, InventoryItem, InventoryBalance
 from kbeton.models.enums import ShiftStatus, ProductType
 from kbeton.services.s3 import put_bytes
 from kbeton.services.audit import audit_log
@@ -299,6 +300,207 @@ def _production_dashboard_summary(session, *, start: date, end: date) -> list[st
     if not has_any:
         lines.append("Нет подтвержденного выпуска за период.")
     return lines
+
+def _fmt_money(value: float | None) -> str:
+    amount = float(value or 0)
+    if abs(amount - round(amount)) < 0.005:
+        body = f"{int(round(amount)):,}".replace(",", " ")
+    else:
+        body = f"{amount:,.2f}".replace(",", " ")
+    return f"{body} сом"
+
+def _fmt_qty(value: float | None, uom: str) -> str:
+    qty = float(value or 0)
+    if abs(qty - round(qty)) < 0.0005:
+        body = str(int(round(qty)))
+    else:
+        body = f"{qty:.3f}".rstrip("0").rstrip(".")
+    return f"{body} {uom}"
+
+def _clip(value: str, size: int) -> str:
+    value = (value or "").strip()
+    if len(value) <= size:
+        return value
+    return value[: max(1, size - 1)] + "…"
+
+def _latest_counterparty_snapshot_map(session) -> tuple[CounterpartySnapshot | None, dict[str, CounterpartyBalance]]:
+    snap = session.query(CounterpartySnapshot).order_by(CounterpartySnapshot.id.desc()).first()
+    if not snap:
+        return None, {}
+    rows = session.query(CounterpartyBalance).filter(CounterpartyBalance.snapshot_id == snap.id).all()
+    return snap, {r.counterparty_name_norm: r for r in rows}
+
+def _dashboard_realization_lines(session, *, start: date, end: date, cp_map: dict[str, CounterpartyBalance]) -> list[str]:
+    rows = (
+        session.query(
+            ProductionShift.counterparty_name,
+            ProductionOutput.product_type,
+            ProductionOutput.mark,
+            ProductionOutput.uom,
+            ProductionRealization.realized_qty,
+            ProductionRealization.total_amount,
+        )
+        .join(ProductionOutput, ProductionOutput.id == ProductionRealization.output_id)
+        .join(ProductionShift, ProductionShift.id == ProductionOutput.shift_id)
+        .filter(ProductionShift.date >= start, ProductionShift.date <= end)
+        .order_by(ProductionRealization.id.desc())
+        .limit(5)
+        .all()
+    )
+    lines = ["Реализация:"]
+    if not rows:
+        lines.append("- нет данных")
+        return lines
+
+    for counterparty_name, product_type, mark, uom, realized_qty, total_amount in rows:
+        cp_name = (counterparty_name or "").strip()
+        cp_norm = norm_counterparty_name(cp_name)
+        cp_row = cp_map.get(cp_norm) if cp_norm else None
+        if cp_row and float(cp_row.receivable_money or 0) > 0:
+            status = f"долг {_fmt_money(cp_row.receivable_money)}"
+        elif cp_row:
+            status = "оплачено"
+        else:
+            status = "нет данных"
+        product_name = _product_type_label(product_type)
+        if product_type == ProductType.concrete and (mark or "").strip():
+            product_name = (mark or "").strip()
+        lines.append(
+            f"- {_clip(cp_name or 'Без контрагента', 14):<14} | "
+            f"{_clip(product_name, 8):<8} | "
+            f"{_fmt_qty(realized_qty, uom):<10} | "
+            f"{_fmt_money(total_amount):<12} | {status}"
+        )
+    return lines
+
+def _dashboard_counterparty_lines(title: str, rows: list[tuple[str, float]]) -> list[str]:
+    lines = [title]
+    if not rows:
+        lines.append("- нет данных")
+        return lines
+    for name, amount in rows[:5]:
+        lines.append(f"- {_clip(name, 22):<22} {_fmt_money(amount)}")
+    return lines
+
+def _dashboard_production_lines(session, *, start: date, end: date) -> list[str]:
+    rows = (
+        session.query(ProductionOutput.product_type, ProductionOutput.mark, ProductionOutput.quantity, ProductionOutput.uom)
+        .join(ProductionShift, ProductionShift.id == ProductionOutput.shift_id)
+        .filter(ProductionShift.status == ShiftStatus.approved)
+        .filter(ProductionShift.date >= start, ProductionShift.date <= end)
+        .all()
+    )
+    lines = ["Производство:"]
+    if not rows:
+        lines.append("- нет данных")
+        return lines
+
+    totals: dict[tuple[str, str, str], float] = {}
+    for product_type, mark, quantity, uom in rows:
+        ptype = product_type.value if isinstance(product_type, ProductType) else str(product_type)
+        key = (ptype, (mark or "").strip(), uom or "ед.")
+        totals[key] = totals.get(key, 0.0) + float(quantity or 0)
+
+    ordered: list[tuple[str, str, str]] = []
+    for key in [
+        (ProductType.concrete.value, "M350", "м3"),
+        (ProductType.concrete.value, "M300", "м3"),
+        (ProductType.concrete.value, "M250", "м3"),
+        (ProductType.concrete.value, "M200", "м3"),
+    ]:
+        if key in totals:
+            ordered.append(key)
+    for ptype in [ProductType.crushed_stone.value, ProductType.screening.value, ProductType.sand.value, ProductType.blocks.value]:
+        matching = [k for k in totals.keys() if k[0] == ptype]
+        ordered.extend(sorted(matching))
+    remaining = [k for k in totals.keys() if k not in ordered]
+    ordered.extend(sorted(remaining))
+
+    seen: set[tuple[str, str, str]] = set()
+    for ptype, mark, uom in ordered:
+        key = (ptype, mark, uom)
+        if key in seen:
+            continue
+        seen.add(key)
+        qty = totals[key]
+        label = _product_type_label(ptype)
+        if ptype == ProductType.concrete.value and mark:
+            label = mark
+        lines.append(f"- {_clip(label, 22):<22} {_fmt_qty(qty, uom)}")
+    return lines
+
+def _dashboard_inventory_lines(session) -> list[str]:
+    rows = (
+        session.query(InventoryItem.name, InventoryItem.uom, InventoryBalance.qty)
+        .join(InventoryBalance, InventoryBalance.item_id == InventoryItem.id)
+        .filter(InventoryItem.is_active == True)
+        .all()
+    )
+    lines = ["Склад:"]
+    if not rows:
+        lines.append("- нет данных")
+        return lines
+
+    labels = [
+        ("Щебень", ("щебень",)),
+        ("Отсев", ("отсев",)),
+        ("Песок", ("песок",)),
+        ("Цемент", ("цемент",)),
+        ("Топливо", ("топливо", "дизель", "соляр")),
+    ]
+    selected: dict[str, tuple[str, float, str]] = {}
+    for raw_name, uom, qty in rows:
+        low = (raw_name or "").strip().lower()
+        for label, tokens in labels:
+            if label in selected:
+                continue
+            if any(token in low for token in tokens):
+                selected[label] = (raw_name, float(qty or 0), uom or "ед.")
+                break
+
+    for label, _tokens in labels:
+        item = selected.get(label)
+        if item:
+            _raw_name, qty, uom = item
+            lines.append(f"- {label:<22} {_fmt_qty(qty, uom)}")
+        else:
+            lines.append(f"- {label:<22} нет данных")
+    return lines
+
+def _build_dashboard_text(session, *, start: date, end: date) -> str:
+    snap, cp_map = _latest_counterparty_snapshot_map(session)
+    cp_rows = list(cp_map.values())
+    debtors = sorted(
+        ((r.counterparty_name, float(r.receivable_money or 0)) for r in cp_rows if float(r.receivable_money or 0) > 0),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    creditors = sorted(
+        ((r.counterparty_name, float(r.payable_money or 0)) for r in cp_rows if float(r.payable_money or 0) > 0),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    lines = [
+        "Дашборд",
+        "",
+        f"Дата: {end.strftime('%d.%m.%Y')}",
+        "Р/с: нет данных",
+        "Касса: нет данных",
+        "",
+        * _dashboard_realization_lines(session, start=start, end=end, cp_map=cp_map),
+        "",
+        * _dashboard_counterparty_lines("Д/з задолженность:", debtors),
+        "",
+        * _dashboard_counterparty_lines("К/з задолженность:", creditors),
+        "",
+        * _dashboard_production_lines(session, start=start, end=end),
+        "",
+        * _dashboard_inventory_lines(session),
+    ]
+    if snap:
+        lines.insert(6, f"Снимок взаиморасчетов: {snap.snapshot_date.strftime('%d.%m.%Y')}")
+    return "\n".join(lines)
 
 def _realization_candidates(session):
     outputs = (
@@ -1378,20 +1580,9 @@ async def dashboard_quick(message: Message, **data):
     ensure_role(user, {Role.Admin, Role.FinDir, Role.Viewer})
     start, end = _range_for("month")
     with session_scope() as session:
-        rows, meta = pnl_calc(session, start=start, end=end, period="day")
-        prod_lines = _production_dashboard_summary(session, start=start, end=end)
+        text = _build_dashboard_text(session, start=start, end=end)
         audit_log(session, actor_user_id=user.id, action="dashboard_view", entity_type="pnl", entity_id="month", payload={"period": "month"})
-    lines = [
-        "📊 Дашборд",
-        f"Текущий месяц: {start.isoformat()} → {end.isoformat()}",
-        f"Доход: {meta['total_income']:.2f}",
-        f"Расход: {meta['total_expense']:.2f}",
-        f"Чистая прибыль: {meta['total_net']:.2f}",
-        f"Неразобранное: {meta.get('unknown_count', 0)}",
-        "",
-        *prod_lines,
-    ]
-    await message.answer("\n".join(lines))
+    await message.answer(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
 
 @router.message(F.text == "Контрагенты/Задолженность (снимки)")
 async def cp_report(message: Message, state: FSMContext, **data):
