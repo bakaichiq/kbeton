@@ -11,7 +11,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile critical modules
+        run: |
+          python -m py_compile \
+            apps/bot/keyboards.py \
+            apps/bot/routers/errors.py \
+            apps/bot/routers/finance.py \
+            apps/bot/routers/production.py \
+            apps/bot/routers/start.py \
+            apps/bot/routers/admin.py \
+            kbeton/models/audit.py \
+            kbeton/models/finance.py \
+            kbeton/models/counterparty.py \
+            kbeton/importers/utils.py \
+            tests/test_bot_states.py \
+            tests/test_bot_full.py \
+            tests/test_bot_scenarios.py \
+            tests/test_dashboard_text.py \
+            tests/test_dashboard_period_keyboard.py \
+            tests/test_invite_keyboard.py \
+            tests/test_recipe_mark_keyboard.py \
+            tests/test_user_invites.py
+
+      - name: Run test suite
+        run: |
+          pytest -q
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

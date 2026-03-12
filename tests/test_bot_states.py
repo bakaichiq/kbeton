@@ -26,6 +26,8 @@ from apps.bot.states import (
     InventoryTxnState, InventoryAdjustState, AdminSetRoleState,
     ConcreteRecipeState, MaterialPriceState, OverheadCostState
 )
+from apps.bot.keyboards import finance_menu, production_menu, warehouse_menu, admin_menu
+from apps.bot.routers import start as start_router
 
 
 @pytest.fixture
@@ -392,6 +394,22 @@ class TestEdgeCases:
 
     def test_back_navigation(self):
         """Навигация назад."""
-        # Кнопка "⬅️ Назад" должна возвращать в главное меню
-        # и очищать текущее состояние
-        pass
+        keyboards = [
+            finance_menu(Role.Admin),
+            production_menu(Role.Admin),
+            warehouse_menu(Role.Admin),
+            admin_menu(Role.Admin),
+        ]
+
+        for kb in keyboards:
+            buttons = [btn.text for row in kb.keyboard for btn in row]
+            assert "⬅️ Назад" in buttons
+            assert "🏠 Главное меню" in buttons
+            assert "❌ Отмена" in buttons
+
+        handler_names = [
+            getattr(handler.callback, "__name__", "")
+            for handler in start_router.router.observers["message"].handlers
+        ]
+        assert "back" in handler_names
+        assert "cancel_text" in handler_names

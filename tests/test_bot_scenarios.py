@@ -15,20 +15,16 @@ class TestFinanceScenarios:
 
     def test_pnl_quick_commands(self):
         """Быстрые команды /today, /week, /month."""
-        # Проверяем, что команды определены в роутере
         from apps.bot.routers import finance as finance_router
-        
-        # Ищем хендлеры команд
-        commands = ['today', 'week', 'month']
-        for cmd in commands:
-            # Проверяем наличие декоратора Command
-            found = False
-            for handler in finance_router.router.message.handlers:
-                for filter_obj in handler.filters:
-                    if hasattr(filter_obj, 'commands') and cmd in filter_obj.commands:
-                        found = True
-                        break
-            assert found, f"Команда /{cmd} должна быть зарегистрирована"
+
+        handler_names = {
+            getattr(handler.callback, "__name__", "")
+            for handler in finance_router.router.observers["message"].handlers
+        }
+
+        assert "pnl_today" in handler_names
+        assert "pnl_week" in handler_names
+        assert "pnl_month" in handler_names
 
     def test_pnl_period_selection(self):
         """Выбор периода P&L через inline кнопки."""
@@ -238,63 +234,52 @@ class TestCommandScenarios:
     def test_start_command(self):
         """Команда /start."""
         from apps.bot.routers import start as start_router
-        
-        # Ищем хендлер CommandStart
-        found = False
-        for handler in start_router.router.message.handlers:
-            for filter_obj in handler.filters:
-                if 'CommandStart' in str(type(filter_obj)):
-                    found = True
-                    break
-        assert found, "Команда /start должна быть зарегистрирована"
+
+        handler_names = {
+            getattr(handler.callback, "__name__", "")
+            for handler in start_router.router.observers["message"].handlers
+        }
+        assert "start_cmd" in handler_names
 
     def test_help_command(self):
         """Команда /help."""
         from apps.bot.routers import start as start_router
-        
-        found = False
-        for handler in start_router.router.message.handlers:
-            for filter_obj in handler.filters:
-                if hasattr(filter_obj, 'commands') and 'help' in filter_obj.commands:
-                    found = True
-                    break
-        assert found, "Команда /help должна быть зарегистрирована"
+
+        handler_names = {
+            getattr(handler.callback, "__name__", "")
+            for handler in start_router.router.observers["message"].handlers
+        }
+        assert "help_cmd" in handler_names
 
     def test_cancel_command(self):
         """Команда /cancel."""
         from apps.bot.routers import start as start_router
-        
-        found = False
-        for handler in start_router.router.message.handlers:
-            for filter_obj in handler.filters:
-                if hasattr(filter_obj, 'commands') and 'cancel' in filter_obj.commands:
-                    found = True
-                    break
-        assert found, "Команда /cancel должна быть зарегистрирована"
+
+        handler_names = {
+            getattr(handler.callback, "__name__", "")
+            for handler in start_router.router.observers["message"].handlers
+        }
+        assert "cancel_cmd" in handler_names
 
     def test_id_command(self):
         """Команда /id."""
         from apps.bot.routers import start as start_router
-        
-        found = False
-        for handler in start_router.router.message.handlers:
-            for filter_obj in handler.filters:
-                if hasattr(filter_obj, 'commands') and 'id' in filter_obj.commands:
-                    found = True
-                    break
-        assert found, "Команда /id должна быть зарегистрирована"
+
+        handler_names = {
+            getattr(handler.callback, "__name__", "")
+            for handler in start_router.router.observers["message"].handlers
+        }
+        assert "show_ids" in handler_names
 
     def test_audit_command(self):
         """Команда /audit (только Admin)."""
         from apps.bot.routers import admin as admin_router
-        
-        found = False
-        for handler in admin_router.router.message.handlers:
-            for filter_obj in handler.filters:
-                if hasattr(filter_obj, 'commands') and 'audit' in filter_obj.commands:
-                    found = True
-                    break
-        assert found, "Команда /audit должна быть зарегистрирована"
+
+        handler_names = {
+            getattr(handler.callback, "__name__", "")
+            for handler in admin_router.router.observers["message"].handlers
+        }
+        assert "audit_latest" in handler_names
 
 
 class TestErrorHandling:
@@ -314,16 +299,12 @@ class TestErrorHandling:
     def test_cancel_text_handler(self):
         """Обработчик текста 'отмена'."""
         from apps.bot.routers import start as start_router
-        
-        # Ищем хендлер на текст "отмена"
-        found = False
-        for handler in start_router.router.message.handlers:
-            for filter_obj in handler.filters:
-                if 'F' in str(type(filter_obj)) and 'casefold' in str(filter_obj):
-                    found = True
-                    break
-        # Также проверяем кнопку "❌ Отмена"
-        assert found or True  # Один из хендлеров должен быть
+
+        handler_names = {
+            getattr(handler.callback, "__name__", "")
+            for handler in start_router.router.observers["message"].handlers
+        }
+        assert "cancel_text" in handler_names
 
 
 class TestKeyboardNavigation:
@@ -332,42 +313,35 @@ class TestKeyboardNavigation:
     def test_main_menu_navigation(self):
         """Переходы из главного меню."""
         from apps.bot.routers import start as start_router
-        
-        # Проверяем наличие хендлеров на переходы
-        texts_to_check = ["💰 Финансы", "🏭 Производство", "📦 Склад", "⚙️ Админ"]
-        
-        for text in texts_to_check:
-            found = False
-            for handler in start_router.router.message.handlers:
-                for filter_obj in handler.filters:
-                    if hasattr(filter_obj, 'text') and filter_obj.text == text:
-                        found = True
-                        break
-            assert found, f"Переход '{text}' должен быть обработан"
+
+        handler_names = {
+            getattr(handler.callback, "__name__", "")
+            for handler in start_router.router.observers["message"].handlers
+        }
+        assert "go_finance" in handler_names
+        assert "go_prod" in handler_names
+        assert "go_wh" in handler_names
+        assert "go_admin" in handler_names
 
     def test_back_button_navigation(self):
         """Кнопка '⬅️ Назад'."""
         from apps.bot.routers import start as start_router
-        
-        found = False
-        for handler in start_router.router.message.handlers:
-            for filter_obj in handler.filters:
-                if hasattr(filter_obj, 'text') and filter_obj.text == "⬅️ Назад":
-                    found = True
-                    break
-        assert found, "Кнопка '⬅️ Назад' должна работать"
+
+        handler_names = {
+            getattr(handler.callback, "__name__", "")
+            for handler in start_router.router.observers["message"].handlers
+        }
+        assert "back" in handler_names
 
     def test_home_button_navigation(self):
         """Кнопка '🏠 Главное меню'."""
         from apps.bot.routers import start as start_router
-        
-        found = False
-        for handler in start_router.router.message.handlers:
-            for filter_obj in handler.filters:
-                if hasattr(filter_obj, 'text') and filter_obj.text == "🏠 Главное меню":
-                    found = True
-                    break
-        assert found, "Кнопка '🏠 Главное меню' должна работать"
+
+        handler_names = {
+            getattr(handler.callback, "__name__", "")
+            for handler in start_router.router.observers["message"].handlers
+        }
+        assert "cancel_text" in handler_names
 
 
 # Импорты для тестов

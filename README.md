@@ -1,6 +1,6 @@
 # KBeton Bot ERP (Telegram + PostgreSQL)
 
-Production-ready система учета и отчетности бетонного завода на базе **Telegram-бота + облачной БД (PostgreSQL)**.
+Рабочая система учета и отчетности бетонного завода на базе **Telegram-бота + PostgreSQL** с Docker-деплоем, CI и автодеплоем.
 
 ## Что реализовано
 
@@ -133,6 +133,10 @@ docker compose run --rm api python scripts/seed_demo.py
 pip install -r requirements.txt
 pytest -q
 ```
+
+В GitHub Actions:
+- `.github/workflows/ci.yml` — полный CI прогон
+- `.github/workflows/deploy-on-push.yml` — деплой только после успешного test job
 
 ---
 

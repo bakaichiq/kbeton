@@ -28,6 +28,5 @@ async def on_error(event: ErrorEvent):
             await event.update.callback_query.message.answer(msg)
             await event.update.callback_query.answer()
     except Exception:
-        # ignore secondary errors
-        pass
+        log.exception("bot_error_handler_failed")
     return True

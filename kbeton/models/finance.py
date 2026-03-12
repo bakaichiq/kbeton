@@ -6,6 +6,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Integer,
+    JSON,
     Numeric,
     String,
     Text,
@@ -47,7 +48,7 @@ class ImportJob(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
     filename: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     s3_key: Mapped[str] = mapped_column(String(512), nullable=False, default="")
-    summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    summary: Mapped[dict] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=False, default=dict)
     error: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_by_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
@@ -75,6 +76,6 @@ class FinanceTransaction(Base):
     expense_article_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("finance_articles.id", ondelete="SET NULL"), nullable=True)
 
     dedup_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    raw_fields: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    raw_fields: Mapped[dict] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=False, default=dict)
 
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

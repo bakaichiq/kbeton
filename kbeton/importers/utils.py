@@ -32,7 +32,21 @@ def parse_money(v) -> float:
         return 0.0
     if isinstance(v, (int, float)):
         return float(v)
-    s = str(v).strip().replace(" ", "").replace(",", ".")
+    s = str(v).strip().replace(" ", "")
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        if s.count(",") > 1:
+            s = s.replace(",", "")
+        else:
+            left, right = s.split(",", 1)
+            if len(right) == 3 and left.isdigit():
+                s = left + right
+            else:
+                s = left + "." + right
     try:
         return float(Decimal(s))
     except (InvalidOperation, ValueError):
