@@ -1,20 +1,29 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
+import structlog
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from kbeton.db.session import session_scope
-from kbeton.models.enums import Role, ShiftType, ShiftStatus, ProductType, PriceKind, InventoryTxnType
+from kbeton.models.enums import Role, ShiftType, ShiftStatus, ProductType
 from kbeton.models.production import ProductionShift, ProductionOutput
-from kbeton.models.pricing import PriceVersion
-from kbeton.models.recipes import ConcreteRecipe
 from kbeton.models.user import User
-from kbeton.models.inventory import InventoryItem, InventoryBalance, InventoryTxn
-from kbeton.models.counterparty import CounterpartySnapshot, CounterpartyBalance
 from kbeton.services.audit import audit_log
+from kbeton.services.production import (
+    approve_shift,
+    build_pending_shift_lines,
+    build_shift_summary,
+    get_concrete_marks,
+    get_counterparty_registry,
+    get_shift_report_data,
+    line_label,
+    parse_concrete,
+    report_period_bounds,
+    shift_line_from_outputs,
+)
 
 from apps.bot.keyboards import (
     production_menu,
@@ -34,253 +43,16 @@ from apps.bot.utils import get_db_user, ensure_role
 from kbeton.reports.production_xlsx import production_shifts_to_xlsx
 
 router = Router()
+log = structlog.get_logger(__name__)
 
-def _parse_concrete(line: str) -> list[tuple[str, float]]:
-    # "M300 10, M350=5"
-    out = []
-    s = (line or "").strip()
-    if not s:
-        return out
-    parts = [p.strip() for p in s.replace(";", ",").split(",") if p.strip()]
-    for p in parts:
-        if "=" in p:
-            k, v = p.split("=", 1)
-        else:
-            ss = p.split()
-            if len(ss) != 2:
-                continue
-            k, v = ss[0], ss[1]
-        k = k.strip().upper()
-        try:
-            qty = float(v.strip().replace(",", "."))
-        except ValueError:
-            continue
-        out.append((k, qty))
-    return out
-
-def _get_concrete_marks() -> list[str]:
-    with session_scope() as session:
-        recipe_rows = (
-            session.query(ConcreteRecipe)
-            .filter(ConcreteRecipe.is_active == True)
-            .order_by(ConcreteRecipe.mark.asc())
-            .all()
-        )
-        if recipe_rows:
-            return [r.mark for r in recipe_rows]
-        rows = (
-            session.query(PriceVersion)
-            .filter(PriceVersion.kind == PriceKind.concrete)
-            .order_by(PriceVersion.valid_from.desc(), PriceVersion.id.desc())
-            .all()
-        )
-    seen = set()
-    marks = []
-    for r in rows:
-        key = (r.item_key or "").strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        marks.append(key)
-    return marks
-
-def _build_shift_summary(st: dict) -> list[str]:
-    shift_type = "день" if st.get("shift_type") == "day" else "ночь"
-    line_type = st.get("line_type", "")
-    line_label = "ДУ" if line_type == "du" else "РБУ"
-    lines = [
-        f"Смена: {shift_type}",
-        f"Линия: {line_label}",
-    ]
-    equipment = st.get("equipment", "")
-    area = st.get("area", "")
-    if equipment:
-        lines.append(f"Оборудование: {equipment}")
-    if area:
-        lines.append(f"Площадка: {area}")
-    if line_type == "du":
-        crushed = float(st.get("crushed", 0))
-        screening = float(st.get("screening", 0))
-        sand = float(st.get("sand", 0))
-        lines.append(f"Щебень: {crushed:.3f} тн")
-        lines.append(f"Отсев: {screening:.3f} тн")
-        lines.append(f"Песок: {sand:.3f} тн")
-    elif line_type == "rbu":
-        counterparty_name = (st.get("counterparty_name") or "").strip()
-        lines.append(f"Контрагент: {counterparty_name or '-'}")
-        concrete = st.get("concrete", [])
-        if concrete:
-            lines.append("Бетон по маркам (м3):")
-            for mark, qty in concrete:
-                lines.append(f"- {mark}: {float(qty):.3f}")
-        else:
-            lines.append("Бетон: нет")
-    comment = (st.get("comment") or "").strip()
-    lines.append(f"Комментарий: {comment or '-'}")
-    return lines
-
-def _line_label(line_type: str) -> str:
-    return "ДУ" if line_type == "du" else "РБУ"
-
-def _shift_line_from_outputs(outputs: list[ProductionOutput]) -> str:
-    for o in outputs:
-        if o.product_type == ProductType.concrete:
-            return "rbu"
-    return "du"
-
-def _build_shift_summary_from_shift(shift: ProductionShift) -> list[str]:
-    line_type = _shift_line_from_outputs(shift.outputs)
-    shift_type = "день" if shift.shift_type == ShiftType.day else "ночь"
-    lines = [
-        f"Смена: {shift_type}",
-        f"Линия: {_line_label(line_type)}",
-    ]
-    if shift.equipment:
-        lines.append(f"Оборудование: {shift.equipment}")
-    if shift.area:
-        lines.append(f"Площадка: {shift.area}")
-    if line_type == "rbu":
-        lines.append(f"Контрагент: {(shift.counterparty_name or '').strip() or '-'}")
-    outputs = {}
-    concrete = {}
-    for o in shift.outputs:
-        if o.product_type == ProductType.concrete:
-            concrete[o.mark or "-"] = concrete.get(o.mark or "-", 0) + float(o.quantity or 0)
-        else:
-            outputs[o.product_type.value] = outputs.get(o.product_type.value, 0) + float(o.quantity or 0)
-    labels = {
-        "crushed_stone": "Щебень",
-        "screening": "Отсев",
-        "sand": "Песок",
-        "blocks": "Блоки",
-    }
-    for key in ["crushed_stone", "screening", "sand", "blocks"]:
-        if key in outputs:
-            uom = "тн" if key in ("crushed_stone", "screening", "sand") else "шт"
-            lines.append(f"{labels[key]}: {outputs[key]:.3f} {uom}")
-    if concrete:
-        lines.append("Бетон по маркам (м3):")
-        for mark, qty in sorted(concrete.items()):
-            lines.append(f"- {mark}: {qty:.3f}")
-    comment = (shift.comment or "").strip()
-    lines.append(f"Комментарий: {comment or '-'}")
-    return lines
-
-def _report_period_bounds(period: str) -> tuple[date, date, str]:
-    today = date.today()
-    if period == "day":
-        return today, today, "день"
-    if period == "week":
-        return today - timedelta(days=6), today, "7 дней"
-    return today - timedelta(days=29), today, "30 дней"
-
-def _get_shift_report_data(session, *, start: date, end: date, line: str, operator_id: int | None) -> tuple[list[ProductionShift], dict]:
-    q = session.query(ProductionShift).filter(
-        ProductionShift.status == ShiftStatus.approved,
-        ProductionShift.date >= start,
-        ProductionShift.date <= end,
-    )
-    if operator_id:
-        q = q.filter(ProductionShift.operator_user_id == operator_id)
-    shifts = q.order_by(ProductionShift.date.desc(), ProductionShift.id.desc()).all()
-    out = []
-    totals = {}
-    concrete = {}
-    for s in shifts:
-        line_type = _shift_line_from_outputs(s.outputs)
-        if line != "all" and line_type != line:
-            continue
-        for o in s.outputs:
-            if o.product_type == ProductType.concrete:
-                key = o.mark or "-"
-                concrete[key] = concrete.get(key, 0) + float(o.quantity or 0)
-            else:
-                totals[o.product_type.value] = totals.get(o.product_type.value, 0) + float(o.quantity or 0)
-        out.append(s)
-    meta = {"totals": totals, "concrete": concrete, "count": len(out)}
-    return out, meta
-
-def _apply_balance(session, item_id: int, delta: float) -> None:
-    bal = session.query(InventoryBalance).filter(InventoryBalance.item_id == item_id).one_or_none()
-    if not bal:
-        bal = InventoryBalance(item_id=item_id, qty=0)
-        session.add(bal)
-        session.flush()
-    bal.qty = float(bal.qty) + float(delta)
-
-def _get_counterparty_registry() -> list[str]:
-    with session_scope() as session:
-        snap = session.query(CounterpartySnapshot).order_by(CounterpartySnapshot.id.desc()).first()
-        if not snap:
-            return []
-        rows = (
-            session.query(CounterpartyBalance.counterparty_name)
-            .filter(CounterpartyBalance.snapshot_id == snap.id)
-            .order_by(CounterpartyBalance.counterparty_name.asc())
-            .all()
-        )
-    out: list[str] = []
-    seen: set[str] = set()
-    for (name,) in rows:
-        value = (name or "").strip()
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        out.append(value)
-    return out
-
-def _auto_writeoff_concrete(session, shift: ProductionShift, actor_user_id: int) -> tuple[list[str], list[str]]:
-    warnings: list[str] = []
-    notes: list[str] = []
-    outputs = [o for o in shift.outputs if o.product_type == ProductType.concrete]
-    if not outputs:
-        return warnings, notes
-
-    item_map = {i.name.strip().lower(): i for i in session.query(InventoryItem).all()}
-    name_map = {
-        "цемент": "cement_kg",
-        "песок": "sand_t",
-        "щебень": "crushed_stone_t",
-        "отсев": "screening_t",
-    }
-    required_items = {k: item_map.get(k) for k in name_map.keys()}
-    for k, v in required_items.items():
-        if v is None:
-            warnings.append(f"Нет расходника '{k}' в справочнике склада.")
-
-    totals = {k: 0.0 for k in name_map.keys()}
-    for o in outputs:
-        mark = (o.mark or "").strip()
-        recipe = session.query(ConcreteRecipe).filter(ConcreteRecipe.mark == mark, ConcreteRecipe.is_active == True).one_or_none()
-        if recipe is None:
-            warnings.append(f"Нет рецептуры для марки {mark}.")
-            continue
-        qty_m3 = float(o.quantity or 0)
-        totals["цемент"] += float(recipe.cement_kg or 0) * qty_m3
-        totals["песок"] += float(recipe.sand_t or 0) * qty_m3
-        totals["щебень"] += float(recipe.crushed_stone_t or 0) * qty_m3
-        totals["отсев"] += float(recipe.screening_t or 0) * qty_m3
-
-    for name, total in totals.items():
-        if total <= 0:
-            continue
-        item = required_items.get(name)
-        if not item:
-            continue
-        txn = InventoryTxn(
-            item_id=item.id,
-            txn_type=InventoryTxnType.writeoff,
-            qty=abs(total),
-            receiver="РБУ",
-            department="Производство",
-            comment=f"Автосписание по смене {shift.id}",
-            created_by_user_id=actor_user_id,
-        )
-        session.add(txn)
-        _apply_balance(session, item_id=item.id, delta=-abs(total))
-        notes.append(f"{item.name}: -{total:.3f} {item.uom}")
-
-    return warnings, notes
+_parse_concrete = parse_concrete
+_get_concrete_marks = get_concrete_marks
+_build_shift_summary = build_shift_summary
+_line_label = line_label
+_shift_line_from_outputs = shift_line_from_outputs
+_report_period_bounds = report_period_bounds
+_get_shift_report_data = get_shift_report_data
+_get_counterparty_registry = get_counterparty_registry
 
 @router.message(F.text == "✅ Закрыть смену")
 async def close_shift_start(message: Message, state: FSMContext, **data):
@@ -516,8 +288,15 @@ async def shift_confirm(call: CallbackQuery, state: FSMContext, **data):
         for tg in head_tg_ids:
             try:
                 await call.message.bot.send_message(chat_id=tg, text=txt, reply_markup=b.as_markup())
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning(
+                    "shift_submit_notify_failed",
+                    shift_id=shift_id,
+                    target_tg_id=tg,
+                    actor_user_id=user.id,
+                    exc_type=type(exc).__name__,
+                    exc=str(exc),
+                )
     await call.answer()
 
 @router.message(F.text == "📝 Смены на согласование")
@@ -530,39 +309,11 @@ async def shifts_pending(message: Message, **data):
             await message.answer("Нет смен на согласование.")
             return
         for s in shifts:
-            outputs = {}
-            concrete = {}
-            for o in s.outputs:
-                if o.product_type == ProductType.concrete:
-                    concrete[o.mark or "-"] = concrete.get(o.mark or "-", 0) + float(o.quantity or 0)
-                else:
-                    outputs[o.product_type.value] = outputs.get(o.product_type.value, 0) + float(o.quantity or 0)
             b = InlineKeyboardBuilder()
             b.button(text="✅ Согласовать", callback_data=f"shift:approve:{s.id}")
             b.button(text="❌ Отклонить", callback_data=f"shift:reject:{s.id}")
             b.adjust(2)
-            lines = [
-                f"ID={s.id} | {s.date} | {s.shift_type.value}",
-                f"Оборудование: {s.equipment}",
-                f"Площадка: {s.area}",
-            ]
-            if (s.counterparty_name or "").strip():
-                lines.append(f"Контрагент: {s.counterparty_name}")
-            labels = {
-                "crushed_stone": "Щебень",
-                "screening": "Отсев",
-                "sand": "Песок",
-                "blocks": "Блоки",
-            }
-            for key in ["crushed_stone", "screening", "sand", "blocks"]:
-                if key in outputs:
-                    uom = "тн" if key in ("crushed_stone", "screening", "sand") else "шт"
-                    lines.append(f"{labels[key]}: {outputs[key]:.3f} {uom}")
-            if concrete:
-                lines.append("Бетон по маркам (м3):")
-                for mark, qty in sorted(concrete.items()):
-                    lines.append(f"- {mark}: {qty:.3f}")
-            lines.append(f"Комментарий: {(s.comment or '-')[:200]}")
+            lines = build_pending_shift_lines(s)
             await message.answer("\n".join(lines), reply_markup=b.as_markup())
 
 @router.message(F.text == "📈 Выпуск/KPI")
@@ -576,22 +327,16 @@ async def production_kpi_period(call: CallbackQuery, **data):
     user = get_db_user(data, call.message)
     ensure_role(user, {Role.Admin, Role.HeadProd, Role.Viewer})
     period = call.data.split(":")[1]
-    today = date.today()
-    if period == "day":
-        start = today
-    elif period == "week":
-        start = today - timedelta(days=6)
-    else:
-        start = today - timedelta(days=29)
+    start, end, period_label = report_period_bounds(period)
     with session_scope() as session:
         rows = (
             session.query(ProductionOutput.product_type, ProductionOutput.mark, ProductionOutput.quantity)
             .join(ProductionShift, ProductionShift.id == ProductionOutput.shift_id)
             .filter(ProductionShift.status == ShiftStatus.approved)
-            .filter(ProductionShift.date >= start, ProductionShift.date <= today)
+            .filter(ProductionShift.date >= start, ProductionShift.date <= end)
             .all()
         )
-        audit_log(session, actor_user_id=user.id, action="production_kpi_view", entity_type="production_shift", entity_id="", payload={"start": start.isoformat(), "end": today.isoformat(), "period": period})
+        audit_log(session, actor_user_id=user.id, action="production_kpi_view", entity_type="production_shift", entity_id="", payload={"start": start.isoformat(), "end": end.isoformat(), "period": period})
     if not rows:
         await call.message.answer("Нет данных за выбранный период.")
         await call.answer()
@@ -604,8 +349,7 @@ async def production_kpi_period(call: CallbackQuery, **data):
             concrete[mark or "-"] = concrete.get(mark or "-", 0) + qty_f
         else:
             totals[ptype.value] = totals.get(ptype.value, 0) + qty_f
-    period_label = "день" if period == "day" else ("7 дней" if period == "week" else "30 дней")
-    lines = [f"📈 Выпуск/KPI ({period_label}: {start.isoformat()} → {today.isoformat()})"]
+    lines = [f"📈 Выпуск/KPI ({period_label}: {start.isoformat()} → {end.isoformat()})"]
     labels = {
         "crushed_stone": "Щебень",
         "screening": "Отсев",
@@ -792,36 +536,26 @@ async def shift_approve(call: CallbackQuery, **data):
     ensure_role(user, {Role.Admin, Role.HeadProd})
     shift_id = int(call.data.split(":")[2])
     with session_scope() as session:
-        s = session.query(ProductionShift).filter(ProductionShift.id == shift_id).one()
-        s.status = ShiftStatus.approved
-        s.approved_by_user_id = user.id
-        s.approved_at = datetime.now().astimezone()
-        s.approval_comment = ""
-        audit_log(session, actor_user_id=user.id, action="shift_approved", entity_type="production_shift", entity_id=str(s.id), payload={})
-        warnings, notes = _auto_writeoff_concrete(session, s, user.id)
-        op_id = s.operator_user_id
-        low_rows = (
-            session.query(InventoryItem, InventoryBalance)
-            .join(InventoryBalance, InventoryBalance.item_id == InventoryItem.id)
-            .filter(InventoryItem.is_active == True)
-            .all()
-        )
-    lines = [f"✅ Смена {shift_id} согласована."]
-    if notes:
+        result = approve_shift(session, shift_id=shift_id, actor_user_id=user.id)
+    if result.approved:
+        lines = [f"✅ Смена {result.shift_id} согласована."]
+    else:
+        lines = [f"❌ Смена {result.shift_id} не согласована."]
+    if result.errors:
+        lines.append("Причины блокировки:")
+        for e in result.errors:
+            lines.append(f"- {e}")
+    if result.approved and result.notes:
         lines.append("Автосписание по рецепту:")
-        for n in notes:
+        for n in result.notes:
             lines.append(f"- {n}")
-    if warnings:
+    if result.warnings:
         lines.append("⚠️ Предупреждения:")
-        for w in warnings:
+        for w in result.warnings:
             lines.append(f"- {w}")
-    low = []
-    for it, bal in low_rows:
-        if float(bal.qty) <= float(it.min_qty):
-            low.append(f"{it.name}: {float(bal.qty):.3f} {it.uom} (мин {float(it.min_qty):.3f})")
-    if low:
+    if result.low_balance_lines:
         lines.append("⚠️ Низкие остатки:")
-        for l in low[:10]:
+        for l in result.low_balance_lines:
             lines.append(f"- {l}")
     await call.message.answer("\n".join(lines))
     await call.answer()
