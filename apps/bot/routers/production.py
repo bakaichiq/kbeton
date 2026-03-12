@@ -32,6 +32,7 @@ from apps.bot.keyboards import (
     counterparty_registry_kb,
     concrete_mark_kb,
     concrete_more_kb,
+    pager_kb,
     yes_no_kb,
     production_period_kb,
     shift_report_period_kb,
@@ -45,6 +46,7 @@ from kbeton.reports.production_xlsx import production_shifts_to_xlsx
 
 router = Router()
 log = structlog.get_logger(__name__)
+PENDING_SHIFTS_PAGE_SIZE = 5
 
 _parse_concrete = parse_concrete
 _get_concrete_marks = get_concrete_marks
@@ -54,6 +56,44 @@ _shift_line_from_outputs = shift_line_from_outputs
 _report_period_bounds = report_period_bounds
 _get_shift_report_data = get_shift_report_data
 _get_counterparty_registry = get_counterparty_registry
+
+
+def _pending_shifts_payload(page: int) -> tuple[str, object]:
+    safe_page = max(0, page)
+    with session_scope() as session:
+        total = session.query(ProductionShift).filter(ProductionShift.status == ShiftStatus.submitted).count()
+        total_pages = max(1, (total + PENDING_SHIFTS_PAGE_SIZE - 1) // PENDING_SHIFTS_PAGE_SIZE)
+        safe_page = min(safe_page, total_pages - 1)
+        shifts = (
+            session.query(ProductionShift)
+            .filter(ProductionShift.status == ShiftStatus.submitted)
+            .order_by(ProductionShift.id.desc())
+            .offset(safe_page * PENDING_SHIFTS_PAGE_SIZE)
+            .limit(PENDING_SHIFTS_PAGE_SIZE)
+            .all()
+        )
+    lines = []
+    builder = InlineKeyboardBuilder()
+    for shift in shifts:
+        shift_line = shift_line_from_outputs(shift.outputs)
+        lines.append(
+            f"#{shift.id} · {shift.date.isoformat()} · {shift.shift_type.value} · {line_label(shift_line)}"
+        )
+        builder.button(text=f"Открыть #{shift.id}", callback_data=f"shift_open:{shift.id}")
+    text = section_text(
+        "Смены на согласование",
+        lines or ["Нет смен на согласовании."],
+        icon="📝",
+        hint="Откройте смену кнопкой ниже.",
+    )
+    if shifts:
+        builder.adjust(1)
+        markup = builder.as_markup()
+        if total_pages > 1:
+            pager = pager_kb("shift_pending", safe_page, total_pages)
+            markup.inline_keyboard.extend(pager.inline_keyboard)
+        return text, markup
+    return text, None
 
 @router.message(F.text == "✅ Закрыть смену")
 async def close_shift_start(message: Message, state: FSMContext, **data):
@@ -319,19 +359,36 @@ async def shift_confirm(call: CallbackQuery, state: FSMContext, **data):
 async def shifts_pending(message: Message, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.HeadProd})
+    text, markup = _pending_shifts_payload(0)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("shift_pending:"))
+async def shifts_pending_page(call: CallbackQuery, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin, Role.HeadProd})
+    page = int(call.data.split(":")[1])
+    text, markup = _pending_shifts_payload(page)
+    await call.message.edit_text(text, reply_markup=markup)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("shift_open:"))
+async def shift_open(call: CallbackQuery, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin, Role.HeadProd})
+    shift_id = int(call.data.split(":")[1])
     with session_scope() as session:
-        shifts = session.query(ProductionShift).filter(ProductionShift.status == ShiftStatus.submitted).order_by(ProductionShift.id.desc()).limit(10).all()
-        if not shifts:
-            await message.answer("Нет смен на согласование.")
-            return
-        await message.answer(section_text("Смены на согласование", [f"Показано: {len(shifts)}"], icon="📝"))
-        for s in shifts:
-            b = InlineKeyboardBuilder()
-            b.button(text="✅ Согласовать", callback_data=f"shift:approve:{s.id}")
-            b.button(text="❌ Отклонить", callback_data=f"shift:reject:{s.id}")
-            b.adjust(2)
-            lines = build_pending_shift_lines(s)
-            await message.answer("\n".join(lines), reply_markup=b.as_markup())
+        shift = session.query(ProductionShift).filter(ProductionShift.id == shift_id).one_or_none()
+    if not shift:
+        await call.answer("Смена не найдена.", show_alert=False)
+        return
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Согласовать", callback_data=f"shift:approve:{shift.id}")
+    b.button(text="❌ Отклонить", callback_data=f"shift:reject:{shift.id}")
+    b.adjust(2)
+    await call.message.answer("\n".join(build_pending_shift_lines(shift)), reply_markup=b.as_markup())
+    await call.answer()
 
 @router.message(F.text == "📈 Выпуск/KPI")
 async def production_kpi(message: Message, **data):

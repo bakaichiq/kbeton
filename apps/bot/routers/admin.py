@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 
 from kbeton.db.session import session_scope
@@ -15,7 +15,7 @@ from kbeton.services.audit import audit_log
 from kbeton.services.invites import create_user_invite
 
 from apps.bot.states import AdminSetRoleState, ConcreteRecipeState, InviteLinkState
-from apps.bot.ui import preview_text, section_text, wizard_text
+from apps.bot.ui import list_text, preview_text, section_text, wizard_text
 from apps.bot.utils import get_db_user, ensure_role
 from apps.bot.keyboards import (
     admin_role_kb,
@@ -23,10 +23,12 @@ from apps.bot.keyboards import (
     CONCRETE_RECIPE_MARKS,
     invite_role_kb,
     INVITE_ROLE_OPTIONS,
+    pager_kb,
     yes_no_kb,
 )
 
 router = Router()
+USERS_PAGE_SIZE = 10
 
 def _parse_float(value: str) -> float | None:
     try:
@@ -34,19 +36,54 @@ def _parse_float(value: str) -> float | None:
     except ValueError:
         return None
 
+
+def _users_page_payload(page: int) -> tuple[str, object]:
+    safe_page = max(0, page)
+    with session_scope() as session:
+        total = session.query(User).count()
+        total_pages = max(1, (total + USERS_PAGE_SIZE - 1) // USERS_PAGE_SIZE)
+        safe_page = min(safe_page, total_pages - 1)
+        rows = (
+            session.query(User)
+            .order_by(User.id.desc())
+            .offset(safe_page * USERS_PAGE_SIZE)
+            .limit(USERS_PAGE_SIZE)
+            .all()
+        )
+    lines = [
+        f"- tg_id={u.tg_id} | {u.full_name or '-'} | role={u.role.value} | active={u.is_active}"
+        for u in rows
+    ]
+    text = list_text(
+        "Пользователи и роли",
+        lines,
+        page=safe_page,
+        total_pages=total_pages,
+        total_items=total,
+        icon="👤",
+        hint="Введите tg_id пользователя, чтобы изменить роль.",
+    )
+    markup = pager_kb("admin_users", safe_page, total_pages) if total_pages > 1 else None
+    return text, markup
+
 @router.message(F.text == "👤 Пользователи и роли")
 async def users_roles(message: Message, state: FSMContext, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin})
-    with session_scope() as session:
-        users = session.query(User).order_by(User.id.desc()).limit(50).all()
-    lines = ["Последние 50 пользователей:"]
-    for u in users:
-        lines.append(f"- tg_id={u.tg_id} | {u.full_name} | role={u.role.value} | active={u.is_active}")
-    lines.append("")
-    lines.append("Чтобы изменить роль: отправьте tg_id.")
     await state.set_state(AdminSetRoleState.waiting_tg_id)
-    await message.answer(section_text("Пользователи и роли", lines, icon="👤", hint="Введите tg_id пользователя."))
+    text, markup = _users_page_payload(0)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("admin_users:"))
+async def users_roles_page(call: CallbackQuery, state: FSMContext, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin})
+    await state.set_state(AdminSetRoleState.waiting_tg_id)
+    page = int(call.data.split(":")[1])
+    text, markup = _users_page_payload(page)
+    await call.message.edit_text(text, reply_markup=markup)
+    await call.answer()
 
 @router.message(AdminSetRoleState.waiting_tg_id)
 async def set_role_tg(message: Message, state: FSMContext, **data):
@@ -128,13 +165,11 @@ async def settings_refs(message: Message, **data):
     ensure_role(user, {Role.Admin})
     with session_scope() as session:
         items = session.query(InventoryItem).order_by(InventoryItem.name.asc()).limit(50).all()
-    lines = ["⚙️ Справочники"]
-    lines.append("\n📦 Расходники (до 50):")
+    lines = ["Расходники (до 50):"]
     for it in items:
         lines.append(f"- {it.name} | uom={it.uom} | min={float(it.min_qty):.3f} | active={it.is_active}")
-    lines.append("\nЧтобы добавить расходник: отправьте строку формата:")
-    lines.append("Название;Ед;Мин (пример: Электроды;кг;5)")
-    await message.answer("\n".join(lines))
+    lines.extend(["", "Чтобы добавить расходник, отправьте строку: Название;Ед;Мин", "Пример: Электроды;кг;5"])
+    await message.answer(section_text("Справочники", lines, icon="⚙️"))
 
 @router.message(Command("audit"))
 @router.message(F.text == "🕒 Последние изменения")
@@ -148,14 +183,14 @@ async def audit_latest(message: Message, **data):
         if actor_ids:
             users = {u.id: u for u in session.query(User).filter(User.id.in_(actor_ids)).all()}
     if not rows:
-        await message.answer("Журнал пока пуст.")
+        await message.answer(section_text("Последние изменения", ["Журнал пока пуст."], icon="🕒", hint="Изменения появятся после первых действий пользователей."))
         return
-    lines = ["🕒 Последние изменения (до 20):"]
+    lines = []
     for r in rows:
         actor = users.get(r.actor_user_id)
         actor_label = f"{actor.full_name or 'user'} (tg:{actor.tg_id})" if actor else "system/unknown"
         lines.append(f"{r.created_at.isoformat()} | {actor_label} | {r.action} | {r.entity_type}:{r.entity_id}")
-    await message.answer("\n".join(lines))
+    await message.answer(section_text("Последние изменения", lines, icon="🕒"))
 
 @router.message(F.text == "🧪 Рецептуры бетона")
 async def recipes_list(message: Message, state: FSMContext, **data):

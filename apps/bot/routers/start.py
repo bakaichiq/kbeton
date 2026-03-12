@@ -111,6 +111,11 @@ async def back(message: Message, state: FSMContext, **data):
     title, markup = _state_menu(state_name, user.role)
     await message.answer(title, reply_markup=markup)
 
+
+@router.callback_query(F.data == "noop")
+async def noop_callback(call):
+    await call.answer()
+
 @router.message(F.text == "💰 Финансы")
 async def go_finance(message: Message, **data):
     user = get_db_user(data, message)

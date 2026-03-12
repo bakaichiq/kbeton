@@ -13,10 +13,12 @@ from kbeton.services.audit import audit_log
 from kbeton.services.s3 import put_bytes
 
 from apps.bot.states import InventoryTxnState, InventoryAdjustState
-from apps.bot.ui import section_text, wizard_text
+from apps.bot.keyboards import pager_kb
+from apps.bot.ui import list_text, section_text, wizard_text
 from apps.bot.utils import get_db_user, ensure_role
 
 router = Router()
+BALANCES_PAGE_SIZE = 12
 
 def _items_kb(items: list[InventoryItem], action: str):
     b = InlineKeyboardBuilder()
@@ -32,6 +34,44 @@ def _apply_balance(session, item_id: int, delta: float):
         session.add(bal)
         session.flush()
     bal.qty = float(bal.qty) + float(delta)
+
+
+def _balances_page_payload(page: int) -> tuple[str, object]:
+    safe_page = max(0, page)
+    with session_scope() as session:
+        total = (
+            session.query(InventoryItem)
+            .join(InventoryBalance, InventoryBalance.item_id == InventoryItem.id)
+            .count()
+        )
+        total_pages = max(1, (total + BALANCES_PAGE_SIZE - 1) // BALANCES_PAGE_SIZE)
+        safe_page = min(safe_page, total_pages - 1)
+        rows = (
+            session.query(InventoryItem, InventoryBalance)
+            .join(InventoryBalance, InventoryBalance.item_id == InventoryItem.id)
+            .order_by(InventoryItem.name.asc())
+            .offset(safe_page * BALANCES_PAGE_SIZE)
+            .limit(BALANCES_PAGE_SIZE)
+            .all()
+        )
+    body_lines = []
+    for item, balance in rows:
+        flag = "⚠️ " if float(balance.qty) <= float(item.min_qty) else ""
+        body_lines.append(
+            f"{flag}{item.name}: {float(balance.qty):.3f} {item.uom} "
+            f"(мин {float(item.min_qty):.3f})"
+        )
+    text = list_text(
+        "Остатки склада",
+        body_lines,
+        page=safe_page,
+        total_pages=total_pages,
+        total_items=total,
+        icon="📦",
+        hint="⚠️ означает остаток ниже минимума.",
+    )
+    markup = pager_kb("inv_balances", safe_page, total_pages) if total_pages > 1 else None
+    return text, markup
 
 @router.message(F.text == "📤 Выдать расходник")
 async def issue_start(message: Message, state: FSMContext, **data):
@@ -287,23 +327,30 @@ async def receipt_invoice_photo(message: Message, state: FSMContext, **data):
 async def receipt_invoice_photo_waiting(message: Message, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.Warehouse})
-    await message.answer("Нужно отправить фото накладного (как фото) или 'отмена' / /cancel.")
+    await message.answer(section_text("Приход расходника", ["Нужно отправить фото накладного как фото."], icon="⚠️", hint="Или отмените операцию."))
 
 @router.message(F.text == "📦 Остатки")
 async def balances(message: Message, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.Warehouse, Role.Viewer})
     with session_scope() as session:
-        rows = session.query(InventoryItem, InventoryBalance).join(InventoryBalance, InventoryBalance.item_id == InventoryItem.id).order_by(InventoryItem.name.asc()).all()
-        audit_log(session, actor_user_id=user.id, action="inventory_balances_view", entity_type="inventory_balance", entity_id="", payload={"count": len(rows)})
-    if not rows:
-        await message.answer("Нет остатков. Добавьте номенклатуру и проведите инвентаризацию.")
+        total = session.query(InventoryItem).join(InventoryBalance, InventoryBalance.item_id == InventoryItem.id).count()
+        audit_log(session, actor_user_id=user.id, action="inventory_balances_view", entity_type="inventory_balance", entity_id="", payload={"count": total})
+    if not total:
+        await message.answer(section_text("Остатки склада", ["Нет остатков."], icon="📦", hint="Добавьте номенклатуру и проведите инвентаризацию."))
         return
-    lines = ["📦 Остатки:"]
-    for it, bal in rows[:60]:
-        flag = "⚠️" if float(bal.qty) <= float(it.min_qty) else ""
-        lines.append(f"{flag} {it.name}: {float(bal.qty):.3f} {it.uom} (мин {float(it.min_qty):.3f})")
-    await message.answer("\n".join(lines))
+    text, markup = _balances_page_payload(0)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("inv_balances:"))
+async def balances_page(call: CallbackQuery, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin, Role.Warehouse, Role.Viewer})
+    page = int(call.data.split(":")[1])
+    text, markup = _balances_page_payload(page)
+    await call.message.edit_text(text, reply_markup=markup)
+    await call.answer()
 
 @router.message(F.text == "🧮 Инвентаризация")
 async def inv_start(message: Message, state: FSMContext, **data):
@@ -312,7 +359,7 @@ async def inv_start(message: Message, state: FSMContext, **data):
     with session_scope() as session:
         items = session.query(InventoryItem).filter(InventoryItem.is_active == True).order_by(InventoryItem.name.asc()).all()
     if not items:
-        await message.answer("Нет номенклатуры. Добавьте в '⚙️ Настройки/справочники'.")
+        await message.answer(section_text("Инвентаризация", ["Нет номенклатуры."], icon="📦", hint="Добавьте расходники в '⚙️ Настройки/справочники'."))
         return
     await state.set_state(InventoryAdjustState.waiting_item)
     await message.answer(wizard_text("Инвентаризация", step=1, total=3, body_lines=["Выберите расходник для инвентаризации."]), reply_markup=_items_kb(items, action="inv"))

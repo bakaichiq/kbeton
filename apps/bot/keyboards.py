@@ -282,3 +282,20 @@ def admin_role_kb() -> ReplyKeyboardMarkup:
         kb.add(KeyboardButton(text=text))
     _adjust_rows(kb, [2, 1], len(ADMIN_ROLE_OPTIONS))
     return kb.as_markup(resize_keyboard=True)
+
+
+def pager_kb(prefix: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    prev_page = max(0, page - 1)
+    next_page = min(total_pages - 1, page + 1)
+    b.button(
+        text="← Назад",
+        callback_data=f"{prefix}:{prev_page}" if page > 0 else "noop",
+    )
+    b.button(text=f"{page + 1}/{total_pages}", callback_data="noop")
+    b.button(
+        text="Вперед →",
+        callback_data=f"{prefix}:{next_page}" if page < total_pages - 1 else "noop",
+    )
+    b.adjust(3)
+    return b.as_markup()

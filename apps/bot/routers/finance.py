@@ -36,6 +36,7 @@ from apps.bot.keyboards import (
     articles_kb,
     yes_no_kb,
     finance_menu,
+    pager_kb,
     material_price_kb,
     overhead_cost_kb,
     concrete_cost_mark_kb,
@@ -51,11 +52,13 @@ from apps.bot.states import (
     MaterialPriceState,
     OverheadCostState,
 )
+from apps.bot.ui import list_text, section_text
 from apps.bot.utils import get_db_user, ensure_role
 
 from apps.worker.celery_app import celery
 
 router = Router()
+COUNTERPARTY_PAGE_SIZE = 10
 
 MATERIAL_UNITS = {
     "цемент": "кг",
@@ -402,6 +405,50 @@ def _pnl_payload(period: str):
         text += "\n" + "\n".join(lines)
     caption = f"P&L {period} {start.isoformat()}-{end.isoformat()}"
     return text, xlsx, caption
+
+
+def _counterparty_page_payload(page: int) -> tuple[str | None, object | None]:
+    safe_page = max(0, page)
+    with session_scope() as session:
+        snap = session.query(CounterpartySnapshot).order_by(CounterpartySnapshot.id.desc()).first()
+        if not snap:
+            return None, None
+        total = session.query(CounterpartyBalance).filter(CounterpartyBalance.snapshot_id == snap.id).count()
+        total_pages = max(1, (total + COUNTERPARTY_PAGE_SIZE - 1) // COUNTERPARTY_PAGE_SIZE)
+        safe_page = min(safe_page, total_pages - 1)
+        rows = (
+            session.query(CounterpartyBalance)
+            .filter(CounterpartyBalance.snapshot_id == snap.id)
+            .order_by(
+                CounterpartyBalance.receivable_money.desc(),
+                CounterpartyBalance.payable_money.desc(),
+                CounterpartyBalance.counterparty_name.asc(),
+            )
+            .offset(safe_page * COUNTERPARTY_PAGE_SIZE)
+            .limit(COUNTERPARTY_PAGE_SIZE)
+            .all()
+        )
+    body_lines = []
+    for row in rows:
+        receivable = float(row.receivable_money or 0)
+        payable = float(row.payable_money or 0)
+        marker = "⚠️" if receivable > 0 or payable > 0 else "•"
+        body_lines.append(
+            f"{marker} {row.counterparty_name}: "
+            f"Д/З {receivable:.2f} | К/З {payable:.2f}"
+        )
+    body_lines.insert(0, f"Снимок: {snap.snapshot_date.isoformat()}")
+    text = list_text(
+        "Контрагенты и задолженность",
+        body_lines,
+        page=safe_page,
+        total_pages=total_pages,
+        total_items=total,
+        icon="🤝",
+        hint="Чтобы открыть карточку, отправьте название контрагента сообщением.",
+    )
+    markup = pager_kb("cp_summary", safe_page, total_pages) if total_pages > 1 else None
+    return text, markup
 
 @router.message(F.text == "📥 Загрузить взаиморасчеты (контрагенты)")
 async def cp_upload_prompt(message: Message, state: FSMContext, **data):
@@ -1413,40 +1460,27 @@ async def cp_summary(message: Message, state: FSMContext, **data):
     with session_scope() as session:
         snap = session.query(CounterpartySnapshot).order_by(CounterpartySnapshot.id.desc()).first()
         if not snap:
-            await message.answer("Нет снимков. Загрузите XLSX взаиморасчетов.")
+            await message.answer(section_text("Контрагенты и задолженность", ["Нет снимков взаиморасчетов."], icon="🤝", hint="Загрузите XLSX взаиморасчетов в разделе финансов."))
             return
-        rows = session.query(CounterpartyBalance).filter(CounterpartyBalance.snapshot_id == snap.id).all()
         audit_log(session, actor_user_id=user.id, action="counterparty_summary_view", entity_type="counterparty_snapshot", entity_id=str(snap.id), payload={})
-    # top debtors / creditors
-    debtors = sorted(rows, key=lambda r: float(r.receivable_money), reverse=True)[:10]
-    creditors = sorted(rows, key=lambda r: float(r.payable_money), reverse=True)[:10]
-    assets_recv = [r.receivable_assets for r in rows if (r.receivable_assets or "").strip()]
-    assets_pay = [r.payable_assets for r in rows if (r.payable_assets or "").strip()]
-    def _group_assets(items):
-        m = {}
-        for it in items:
-            key = it.strip().lower()
-            m[key] = m.get(key, 0) + 1
-        return sorted(m.items(), key=lambda x: x[1], reverse=True)[:10]
-    recv_g = _group_assets(assets_recv)
-    pay_g = _group_assets(assets_pay)
-
-    lines = [f"🤝 Контрагенты (последний снимок: {snap.snapshot_date.isoformat()})"]
-    lines.append("\nТОП должники (нам должны деньги):")
-    for r in debtors:
-        lines.append(f"- {r.counterparty_name}: {float(r.receivable_money):.2f}")
-    lines.append("\nТОП кредиторы (мы должны деньги):")
-    for r in creditors:
-        lines.append(f"- {r.counterparty_name}: {float(r.payable_money):.2f}")
-    lines.append("\nАктивы нам должны (топ):")
-    for a, cnt in recv_g:
-        lines.append(f"- {a} ×{cnt}")
-    lines.append("\nАктивы мы должны (топ):")
-    for a, cnt in pay_g:
-        lines.append(f"- {a} ×{cnt}")
-    await message.answer("\n".join(lines))
-    await message.answer("Чтобы открыть карточку контрагента, отправьте его название (или 'отмена').")
+    text, markup = _counterparty_page_payload(0)
+    await message.answer(text, reply_markup=markup)
+    await message.answer(section_text("Карточка контрагента", ["Чтобы открыть карточку, отправьте название контрагента."], icon="📌", hint="Или нажмите 'Отмена'."))
     await state.set_state(CounterpartyCardState.waiting_name)
+
+
+@router.callback_query(F.data.startswith("cp_summary:"))
+async def cp_summary_page(call: CallbackQuery, state: FSMContext, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin, Role.FinDir, Role.Viewer})
+    await state.set_state(CounterpartyCardState.waiting_name)
+    page = int(call.data.split(":")[1])
+    text, markup = _counterparty_page_payload(page)
+    if text is None:
+        await call.answer("Нет данных.", show_alert=False)
+        return
+    await call.message.edit_text(text, reply_markup=markup)
+    await call.answer()
 
 @router.message(CounterpartyCardState.waiting_name)
 async def cp_card(message: Message, state: FSMContext, **data):
@@ -1464,7 +1498,7 @@ async def cp_card(message: Message, state: FSMContext, **data):
     with session_scope() as session:
         snap = session.query(CounterpartySnapshot).order_by(CounterpartySnapshot.id.desc()).first()
         if not snap:
-            await message.answer("Нет снимков. Загрузите XLSX взаиморасчетов.")
+            await message.answer(section_text("Карточка контрагента", ["Нет снимков взаиморасчетов."], icon="🤝", hint="Сначала загрузите XLSX взаиморасчетов."))
             await state.clear()
             return
         matches = (
