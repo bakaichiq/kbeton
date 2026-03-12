@@ -30,6 +30,7 @@ from kbeton.importers.utils import norm_counterparty_name
 
 from apps.bot.keyboards import (
     pnl_period_kb,
+    dashboard_period_kb,
     articles_kb,
     yes_no_kb,
     finance_menu,
@@ -539,6 +540,14 @@ def _build_dashboard_text(session, *, start: date, end: date) -> str:
     lines.extend([""] + _dashboard_section(stock_lines[0].rstrip(':'), "📦", stock_body))
 
     return "\n".join(lines)
+
+def _dashboard_period_label(period: str) -> str:
+    return {
+        "day": "today",
+        "week": "week",
+        "month": "month",
+        "year": "year",
+    }.get(period, period)
 
 def _realization_candidates(session):
     outputs = (
@@ -1616,11 +1625,50 @@ async def concrete_cost_report(message: Message, **data):
 async def dashboard_quick(message: Message, **data):
     user = get_db_user(data, message)
     ensure_role(user, {Role.Admin, Role.FinDir, Role.Viewer})
-    start, end = _range_for("month")
+    period = "month"
+    start, end = _range_for(period)
     with session_scope() as session:
         text = _build_dashboard_text(session, start=start, end=end)
-        audit_log(session, actor_user_id=user.id, action="dashboard_view", entity_type="pnl", entity_id="month", payload={"period": "month"})
-    await message.answer(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+        audit_log(
+            session,
+            actor_user_id=user.id,
+            action="dashboard_view",
+            entity_type="pnl",
+            entity_id=_dashboard_period_label(period),
+            payload={"period": period},
+        )
+    await message.answer(
+        f"<pre>{html.escape(text)}</pre>",
+        parse_mode="HTML",
+        reply_markup=dashboard_period_kb(period),
+    )
+
+@router.callback_query(F.data.startswith("dashboard:"))
+async def dashboard_period_pick(call: CallbackQuery, **data):
+    user = get_db_user(data, call.message)
+    ensure_role(user, {Role.Admin, Role.FinDir, Role.Viewer})
+    period = (call.data or "").split(":", 1)[1]
+    if period not in {"day", "week", "month", "year"}:
+        await call.answer("Неизвестный период.", show_alert=False)
+        return
+    start, end = _range_for(period)
+    with session_scope() as session:
+        text = _build_dashboard_text(session, start=start, end=end)
+        audit_log(
+            session,
+            actor_user_id=user.id,
+            action="dashboard_view",
+            entity_type="pnl",
+            entity_id=_dashboard_period_label(period),
+            payload={"period": period},
+        )
+    if call.message:
+        await call.message.edit_text(
+            f"<pre>{html.escape(text)}</pre>",
+            parse_mode="HTML",
+            reply_markup=dashboard_period_kb(period),
+        )
+    await call.answer()
 
 @router.message(F.text == "Контрагенты/Задолженность (снимки)")
 async def cp_report(message: Message, state: FSMContext, **data):

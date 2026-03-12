@@ -201,6 +201,20 @@ def pnl_period_kb() -> InlineKeyboardMarkup:
     b.adjust(5)
     return b.as_markup()
 
+def dashboard_period_kb(active_period: str = "month") -> InlineKeyboardMarkup:
+    labels = [
+        ("day", "Сегодня"),
+        ("week", "Неделя"),
+        ("month", "Месяц"),
+        ("year", "Год"),
+    ]
+    b = InlineKeyboardBuilder()
+    for period, label in labels:
+        prefix = "● " if period == active_period else ""
+        b.button(text=f"{prefix}{label}", callback_data=f"dashboard:{period}")
+    b.adjust(2, 2)
+    return b.as_markup()
+
 def production_period_kb() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for p in ["day", "week", "month"]:
