@@ -6,9 +6,11 @@ from sqlalchemy import Column, Integer, MetaData, Table, create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from kbeton.models.counterparty import CounterpartySnapshot, CounterpartyBalance
-from kbeton.models.enums import ProductType, ShiftStatus, ShiftType
+from kbeton.models.enums import ProductType, ShiftStatus, ShiftType, TxType
+from kbeton.models.finance import FinanceArticle, FinanceTransaction, ImportJob
 from kbeton.models.inventory import InventoryItem, InventoryBalance
 from kbeton.models.production import ProductionShift, ProductionOutput, ProductionRealization
+from kbeton.models.user import User
 
 from apps.bot.routers.finance import _build_dashboard_text
 from kbeton.importers.utils import norm_counterparty_name
@@ -16,10 +18,11 @@ from kbeton.importers.utils import norm_counterparty_name
 
 def _session():
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
-    metadata = MetaData()
-    Table("import_jobs", metadata, Column("id", Integer, primary_key=True))
-    metadata.create_all(engine)
     for table in [
+        User.__table__,
+        FinanceArticle.__table__,
+        ImportJob.__table__,
+        FinanceTransaction.__table__,
         CounterpartySnapshot.__table__,
         CounterpartyBalance.__table__,
         ProductionShift.__table__,
@@ -36,7 +39,58 @@ def _session():
 def test_build_dashboard_text_uses_visual_sections():
     session = _session()
     try:
-        session.execute(text("INSERT INTO import_jobs (id) VALUES (1)"))
+        session.add(User(id=1, tg_id=1, full_name="Admin", is_active=True))
+        session.flush()
+
+        income_article = FinanceArticle(name="Поступление на р/с", kind=TxType.income, is_active=True)
+        expense_article = FinanceArticle(name="Расход из кассы", kind=TxType.expense, is_active=True)
+        session.add_all([income_article, expense_article])
+        session.flush()
+
+        session.add(
+            ImportJob(
+                id=1,
+                kind="manual",
+                status="done",
+                filename="manual",
+                s3_key="",
+                summary={},
+                created_by_user_id=1,
+            )
+        )
+        session.flush()
+
+        session.add_all(
+            [
+                FinanceTransaction(
+                    import_job_id=1,
+                    date=date.today(),
+                    amount=1_000_000,
+                    currency="KGS",
+                    tx_type=TxType.income,
+                    description="Поступление на банк",
+                    counterparty="",
+                    income_article_id=income_article.id,
+                    expense_article_id=None,
+                    dedup_hash="bank-1",
+                    raw_fields={"payment_channel": "bank"},
+                ),
+                FinanceTransaction(
+                    import_job_id=1,
+                    date=date.today(),
+                    amount=20_000,
+                    currency="KGS",
+                    tx_type=TxType.expense,
+                    description="Выдача из кассы",
+                    counterparty="",
+                    income_article_id=None,
+                    expense_article_id=expense_article.id,
+                    dedup_hash="cash-1",
+                    raw_fields={"payment_channel": "cash"},
+                ),
+            ]
+        )
+
         snap = CounterpartySnapshot(snapshot_date=date(2026, 3, 12), import_job_id=1)
         session.add(snap)
         session.flush()
@@ -141,7 +195,9 @@ def test_build_dashboard_text_uses_visual_sections():
         assert date.today().strftime("%d.%m.%Y") in dashboard_text
         assert "Р/с" in dashboard_text
         assert "Касса" in dashboard_text
-        assert "нет данных" in dashboard_text
+        assert "1 000 000 сом" in dashboard_text
+        assert "-20 000 сом" in dashboard_text
+        assert "Источник · операции" in dashboard_text
         assert "┏━━ 🚚 РЕАЛИЗАЦИЯ" in dashboard_text
         assert "Аламуд" in dashboard_text
         assert "570 000 сом" in dashboard_text
